@@ -6,6 +6,18 @@
 
 ---
 
+## Screenshots
+
+| Landing | Equipment System |
+|---------|-----------------|
+| ![Landing](screenshots/landing.png) | ![Equipment](screenshots/equipment.png) |
+
+| Weekly Shop & Marketplace | Team Profile & Trophy Case |
+|--------------------------|---------------------------|
+| ![Shop](screenshots/shop.png) | ![Team Profile](screenshots/team-profile.png) |
+
+---
+
 ## Overview
 
 Dugout combines traditional head-to-head fantasy baseball with RPG mechanics: 8 equipment slots per player, 6 rarity tiers (Common → Mythic), soulbound loot drops, a rotating coin shop, and a player-driven marketplace with tax-based coin sinks.
