@@ -33,6 +33,8 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **8 equipment slots** per player (hat, shades, chain, jersey, glove, bat, wristband, cleats) with **6 rarity tiers** (Common → Mythic).
 - **Soulbound loot** from in-game performance; **marketplace** resales with tax sinks.
 - **Auction draft** with **AI-assisted** nominations and bids; **solo leagues** with bot opponents and **multiplayer** leagues under one account.
+- **5 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge) with distinct bidding aggression, nomination strategy, and draft-phase scaling — bots feel like real opponents, not coin flips.
+- **Flexible league sizes** — commissioners can **fill empty slots with AI managers** in pre-season so you don't need 10 humans. Play with 3 friends and 7 bots, or any mix.
 - **Switch Mode** moves between Solo and League contexts with **independent rosters, gear, scores, and matchups**.
 - **Unified transactions** surface for waivers and trades; **bot** teams participate in waivers and evaluate trades on schedule.
 - **Research** pulls MLB schedules and rosters with fantasy ownership context.
@@ -51,6 +53,7 @@ Ship-ready controls added for a public URL and real users:
 | **Admin / maintenance** | High-impact routes (`roster sync`, **bot pitcher backfill**, bot jobs) require **`X-Admin-Key`** matching `DUGOUT_ADMIN_API_KEY`; missing key → **404** in production. |
 | **Manual scoring** | Gated behind env (`DUGOUT_ALLOW_MANUAL_SCORING`) outside dev to avoid stat injection abuse. |
 | **Secrets in Compose** | Production compose passes admin key and feature flags from `.env` into the app container (not only JWT/DB). |
+| **Password reset** | Email-based 6-digit code flow via Resend; rate-limited (3 req/min for send, 5/min for reset); silent success on unknown emails to prevent enumeration. |
 | **Social / PWA** | Open Graph + Twitter Card meta, compressed **`og-image`**, PNG favicons + manifest icons. |
 
 ---
@@ -90,7 +93,7 @@ Ship-ready controls added for a public URL and real users:
 | **ML** | scikit-learn (GBR, GMM), NumPy, pandas |
 | **Real-time** | SSE (`sse-starlette`) — draft room & live scores |
 | **Data** | MLB Stats API, supporting Python tooling |
-| **Auth** | JWT + bcrypt, email verification (Resend) |
+| **Auth** | JWT + bcrypt, email verification + password reset (Resend) |
 | **Infra** | Multi-stage Docker image, **cloud VPS** + Cloudflare Tunnel |
 
 ---
@@ -108,6 +111,8 @@ Per-game fantasy points via **gradient boosted regression** on rolling game-log 
 ### 3. Draft agent & lineup optimizer
 
 - **Draft recommendations** combine projection value, positional scarcity, roster need, and budget — with natural-language reasoning for the UI.
+- **Bot personality engine** assigns one of **5 archetypes** per bot at draft creation (deterministic by user ID). Each archetype defines tier multipliers, bid increment ranges, timing profiles, and a "drain nomination" probability — bots will sometimes nominate stars they don't need to force opponents to overspend.
+- **Dynamic bidding**: highest-valuation bot bids first (not random), personality-aware increments, and "fight" behavior where bots near their ceiling occasionally push past it.
 - **Lineup optimizer** assigns starters under eligibility and **roster lock** rules; respects gear modifiers in effective scoring.
 - Product messaging: **in-house statistical ML**, not generative AI.
 
@@ -119,7 +124,7 @@ Per-game fantasy points via **gradient boosted regression** on rolling game-log 
 
 In-memory **auction state machine** (nomination → bidding → timers) with **SSE** fan-out. Draft persistence is intentional trade-off: sub-second bid latency vs. surviving process restarts.
 
-**Solo / bot path:** bot nominations and counter-bids use the same valuation and **roster-cap** rules as humans; **pitcher pacing** enforces filling **9 pitching lineup slots** (Yahoo-style) so teams don’t end draft-heavy on hitters.
+**Solo / bot path:** bot nominations and counter-bids use the same valuation and **roster-cap** rules as humans; **pitcher pacing** enforces filling **9 pitching lineup slots** (Yahoo-style) so teams don’t end draft-heavy on hitters. Bots use a **composite scoring engine** for nominations (projection value × scarcity × need) with a timeout fallback to fast DB queries.
 
 ### Live scoring
 
@@ -150,7 +155,7 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 
 - **Backups:** `pg_dump`-based script inside Compose context, **retention** pruning, **cron** on the host; dumps live under the app directory (copy off-box for DR).
 - **Health:** `/api/health` for load balancers and compose healthchecks.
-- **Deploy:** pull → rebuild app image → rolling container restart; env-driven feature flags.
+- **Deploy:** pull → rebuild app image → **Alembic migrations** → rolling container restart; env-driven feature flags.
 
 ---
 
@@ -184,6 +189,8 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Greedy lineup optimizer** | Fast enough for interactive use vs. exponential exact search |
 | **JWT-gated reads** | Shrinks anonymous scraping / abuse surface at scale |
 | **Admin key for dangerous routes** | Maintenance without exposing “hidden” power endpoints |
+| **Bot personality archetypes** | 5 deterministic profiles vs. random behavior; makes AI opponents feel distinct and drafts replayable |
+| **Flexible league sizes** | Commissioner-driven bot fill vs. forced 10-player roster; lowers barrier to starting a league |
 
 ---
 
