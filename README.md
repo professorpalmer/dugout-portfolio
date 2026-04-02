@@ -33,11 +33,11 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **8 equipment slots** per player (hat, shades, chain, jersey, glove, bat, wristband, cleats) with **6 rarity tiers** (Common → Mythic).
 - **Soulbound loot** from in-game performance; **marketplace** resales with tax sinks.
 - **Auction draft** with **AI-assisted** nominations and bids; **solo leagues** with bot opponents and **multiplayer** leagues under one account.
-- **5 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge) with distinct bidding aggression, nomination strategy, and draft-phase scaling — bots feel like real opponents, not coin flips.
+- **5 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge) — **persisted per bot** and used **all season**: draft bidding, waivers, trades, marketplace, lineup optimization, and gear equipping (not draft-only).
 - **Flexible league sizes** — commissioners can **fill empty slots with AI managers** in pre-season so you don't need 10 humans. Play with 3 friends and 7 bots, or any mix.
 - **Switch Mode** moves between Solo and League contexts with **independent rosters, gear, scores, and matchups**.
 - **Unified transactions** surface for waivers and trades; **bot** teams participate in waivers and evaluate trades on schedule.
-- **Research** pulls MLB schedules and rosters with fantasy ownership context.
+- **Research** pulls MLB schedules and rosters with fantasy ownership context; **pitcher roles** (SP / relievers / closers) align with MLB depth-chart data where available.
 - **AI Insights** exposes **projection models** and a **lineup optimizer** (non-generative ML); in-product copy distinguishes proprietary models from LLM hype.
 
 ---
@@ -92,7 +92,7 @@ Ship-ready controls added for a public URL and real users:
 | **Database** | PostgreSQL 16 |
 | **ML** | scikit-learn (GBR, GMM), NumPy, pandas |
 | **Real-time** | SSE (`sse-starlette`) — draft room & live scores |
-| **Data** | MLB Stats API, supporting Python tooling |
+| **Data** | MLB Stats API (rosters, depth charts, game logs, person stats), supporting Python tooling |
 | **Auth** | JWT + bcrypt, email verification + password reset (Resend) |
 | **Infra** | Multi-stage Docker image, **cloud VPS** + Cloudflare Tunnel |
 
@@ -102,17 +102,23 @@ Ship-ready controls added for a public URL and real users:
 
 ### 1. Player projections (GBR)
 
-Per-game fantasy points via **gradient boosted regression** on rolling game-log features (separate hitter/pitcher feature sets), tier-aware floors, and scheduled retraining as new games land.
+Per-game fantasy points via **gradient boosted regression** on rolling game-log features (separate hitter/pitcher feature sets), tier-aware floors, Statcast context, and scheduled retraining as new games land.
 
-### 2. Tier classification (GMM)
+### 2. Tier classification (GMM + production rules)
 
-**Gaussian mixture models** cluster hitters and pitchers into **Star / Starter / Platoon / Bench**; soft assignment and covariance structure vs. rigid k-means. Tiers feed **loot rarity** tuning.
+- **Pools:** Hitters, **starters (SP)**, and **relievers** (RP + depth-chart **CP** closers + inferred `P` arms where games-started ratio indicates relief). Closers compete in the same reliever pool as setup arms — elite stats surface naturally.
+- **Features:** Blended **prior + current season** from `PlayerGameLog` (rate stats blended linearly; counting stats blended per-game when both seasons exist). **Minimum game log** threshold before full GMM classification; model fallback for sparse history with **sanity gates** so tiny samples don’t pollute stars.
+- **Scoring:** **Standardized** feature vectors per pool, **weighted composite score**, then **percentile cutoffs** (e.g. top ~10% → Star) — avoids “one cluster = 25% stars” artifacts from raw GMM cluster-to-tier mapping.
+- **Fallback:** Players who can’t be classified with enough data use `projected_pts_per_game` ranking; **STAR is reserved** for the main pipeline — fallback tier is capped so small-sample flukes don’t show as franchise players.
+- **Data:** Optional **historical season backfill** of game logs (e.g. MLB game-log API) so early-season classification isn’t driven only by a handful of April games.
+- Tiers still feed **loot rarity** tuning.
 
 ### 3. Draft agent & lineup optimizer
 
-- **Draft recommendations** combine projection value, positional scarcity, roster need, and budget — with natural-language reasoning for the UI.
-- **Bot personality engine** assigns one of **5 archetypes** per bot at draft creation (deterministic by user ID). Each archetype defines tier multipliers, bid increment ranges, timing profiles, and a "drain nomination" probability — bots will sometimes nominate stars they don't need to force opponents to overspend.
+- **Draft recommendations** combine projection value, positional scarcity, roster need, and budget — with natural-language reasoning for the UI. Suggestions sort **available players** by **`projected_pts_per_game`** (and league-scoped “already drafted” filtering), not a brittle hand-tuned stat formula.
+- **Bot personality engine** assigns one of **5 archetypes** per bot at draft creation (deterministic / persisted). Each archetype defines tier multipliers, bid increment ranges, timing profiles, and a "drain nomination" probability — bots will sometimes nominate stars they don't need to force opponents to overspend.
 - **Dynamic bidding**: highest-valuation bot bids first (not random), personality-aware increments, and "fight" behavior where bots near their ceiling occasionally push past it.
+- **AFK assistance**: when a human’s turn times out, **AI nominates**; for bidding, **incremental bids** (not huge jumps) with a **“desperate roster”** path so late-draft $1 fills still happen when roster slots outpace budget headroom.
 - **Lineup optimizer** assigns starters under eligibility and **roster lock** rules; respects gear modifiers in effective scoring.
 - Product messaging: **in-house statistical ML**, not generative AI.
 
@@ -124,7 +130,7 @@ Per-game fantasy points via **gradient boosted regression** on rolling game-log 
 
 In-memory **auction state machine** (nomination → bidding → timers) with **SSE** fan-out. Draft persistence is intentional trade-off: sub-second bid latency vs. surviving process restarts.
 
-**Solo / bot path:** bot nominations and counter-bids use the same valuation and **roster-cap** rules as humans; **pitcher pacing** enforces filling **9 pitching lineup slots** (Yahoo-style) so teams don’t end draft-heavy on hitters. Bots use a **composite scoring engine** for nominations (projection value × scarcity × need) with a timeout fallback to fast DB queries.
+**Solo / bot path:** bot nominations and counter-bids use the same valuation and **roster-cap** rules as humans; **pitcher pacing** enforces filling **9 pitching lineup slots** (Yahoo-style) so teams don’t end draft-heavy on hitters. Bots use a **composite scoring engine** for nominations (projection value × scarcity × need). **Bots always auto-nominate on their turn** even if the commissioner disables global auto-nominate for humans — so drafts don’t stall.
 
 ### Live scoring
 
@@ -156,6 +162,7 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 - **Backups:** `pg_dump`-based script inside Compose context, **retention** pruning, **cron** on the host; dumps live under the app directory (copy off-box for DR).
 - **Health:** `/api/health` for load balancers and compose healthchecks.
 - **Deploy:** pull → rebuild app image → **Alembic migrations** → rolling container restart; env-driven feature flags.
+- **Scheduled jobs:** nightly roster sync (teams, names, **pitcher roles** from depth charts where applicable), stat recompute, and classification / training hooks as configured.
 
 ---
 
@@ -185,12 +192,13 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 |----------|-----------|
 | **SSE vs WebSocket** | One-way push for scores/draft; mutations stay on REST |
 | **In-memory draft** | Latency and timer accuracy; acceptable ephemeral state |
-| **GMM tiers** | Softer boundaries between player quality buckets |
+| **GMM + percentile tiers** | Clusters + standardized scores + cutoffs vs. naive “one cluster = one tier” |
 | **Greedy lineup optimizer** | Fast enough for interactive use vs. exponential exact search |
 | **JWT-gated reads** | Shrinks anonymous scraping / abuse surface at scale |
 | **Admin key for dangerous routes** | Maintenance without exposing “hidden” power endpoints |
 | **Bot personality archetypes** | 5 deterministic profiles vs. random behavior; makes AI opponents feel distinct and drafts replayable |
 | **Flexible league sizes** | Commissioner-driven bot fill vs. forced 10-player roster; lowers barrier to starting a league |
+| **MLB depth charts for pitcher roles** | API doesn’t label every reliever “RP” on active rosters; depth chart gives SP/CP; generic `P` inferred from games-started ratio |
 
 ---
 
