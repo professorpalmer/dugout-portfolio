@@ -37,17 +37,48 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 
 ## Security & production hardening
 
-Ship-ready controls added for a public URL and real users:
+Multi-layer security posture for a public-facing app with real users:
 
-| Area | Approach |
-|------|----------|
-| **API reads** | Data routes (`/leagues/...`, `/schedule`, marketplace, leaderboard, etc.) require **`Authorization: Bearer`** by default. Optional `DUGOUT_ALLOW_PUBLIC_READS` for debugging only. |
-| **SSE** | Live score / draft streams expect a **JWT** (e.g. `?token=`) unless `DUGOUT_ALLOW_PUBLIC_SSE` is explicitly enabled. |
-| **Admin / maintenance** | High-impact routes (`roster sync`, **bot pitcher backfill**, bot jobs) require **`X-Admin-Key`** matching `DUGOUT_ADMIN_API_KEY`; missing key → **404** in production. |
-| **Manual scoring** | Gated behind env (`DUGOUT_ALLOW_MANUAL_SCORING`) outside dev to avoid stat injection abuse. |
-| **Secrets in Compose** | Production compose passes admin key and feature flags from `.env` into the app container (not only JWT/DB). |
-| **Password reset** | Email-based 6-digit code flow via Resend; rate-limited (3 req/min for send, 5/min for reset); silent success on unknown emails to prevent enumeration. |
-| **Social / PWA** | Open Graph + Twitter Card meta, compressed **`og-image`**, PNG favicons + manifest icons, push notification support via VAPID/Web Push. |
+### Transport & headers
+
+| Control | Implementation |
+|---------|----------------|
+| **TLS** | Cloudflare Tunnel — all external traffic is HTTPS with edge TLS termination |
+| **HSTS** | `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` |
+| **CSP** | `Content-Security-Policy` restricts scripts, styles, images, and connections to `'self'` + MLB CDN origins; `frame-ancestors 'none'` blocks clickjacking |
+| **Security headers** | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy` (no camera/mic/geo) |
+
+### Authentication & secrets
+
+| Control | Implementation |
+|---------|----------------|
+| **JWT** | HS256 access tokens via `python-jose`; bcrypt password hashing (12 rounds) |
+| **Secret key** | App **crashes on startup** if `DUGOUT_SECRET_KEY` is missing or set to a known placeholder — no silent fallback to a default |
+| **Docker Compose** | Uses `${VAR:?error}` syntax for `POSTGRES_PASSWORD` and `DUGOUT_SECRET_KEY` — Compose refuses to start without secrets in `.env` |
+| **Verification codes** | Generated with `secrets` module (CSPRNG); compared with `hmac.compare_digest` (timing-safe) |
+| **Password reset** | Email-based 6-digit code via Resend; rate-limited (3 req/min send, 5/min reset); silent success on unknown emails to prevent enumeration |
+
+### API security
+
+| Control | Implementation |
+|---------|----------------|
+| **Auth-gated reads** | All data routes require `Authorization: Bearer` by default; optional `DUGOUT_ALLOW_PUBLIC_READS` for debugging |
+| **SSE auth** | Live score / draft streams require JWT via `?token=`; per-user connection cap (max 5) prevents resource exhaustion |
+| **Admin routes** | High-impact endpoints require `X-Admin-Key` matching `DUGOUT_ADMIN_API_KEY`; missing key → **404** (not 403) to prevent discovery |
+| **Rate limiting** | `slowapi` with real client IP extraction (`CF-Connecting-IP` behind Cloudflare); auth endpoints (5-10/min), player search + research (30/min), global fallback |
+| **CORS** | Explicit origin allowlist, restricted to `GET/POST/PUT/DELETE/PATCH/OPTIONS` methods and `Authorization/Content-Type` headers only |
+| **Input validation** | Pydantic v2 models on all request bodies; query param bounds (`limit` capped at 200); typed path parameters |
+| **OpenAPI hidden** | `/docs`, `/redoc`, `/openapi.json` disabled in production (active in dev mode only) |
+| **Path traversal** | SPA fallback verifies resolved file paths stay within the static directory |
+| **Manual scoring** | Gated behind `DUGOUT_ALLOW_MANUAL_SCORING` env flag — disabled in production to prevent stat injection |
+
+### Dependencies & build
+
+| Control | Implementation |
+|---------|----------------|
+| **Pinned versions** | All packages pinned with upper bounds (e.g., `fastapi>=0.115.0,<1.0`) to prevent breaking upgrades |
+| **Multi-stage Docker** | `python:3.12-slim` final image; `pip install --no-cache-dir`; only necessary system packages |
+| **Global error handler** | All unhandled exceptions return generic `{"detail": "Internal server error"}` — no stack traces leak to clients |
 
 ---
 
@@ -306,6 +337,8 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Rolling weekly trade cap** | Season-phase-aware throttle (1→2→3/week) vs. flat cooldown; bots feel more desperate near playoffs without flooding early |
 | **Foul balls as gear-only scoring** | Base weight = 0.0 but gear activates the category; bridges Statcast enrichment and equipment value without inflating base scoring |
 | **Season rarity ceiling + gear fatigue** | Prevents early-season Legendary/Mythic stockpiling and excessive drops from one hot player |
+| **Week-scaled shop pricing** | Price cap ramps with the season (400 → 600 → 1000 → 1500 → uncapped) so early shops are attainable; 1 aspirational "stretch" item per rotation |
+| **Startup secret enforcement** | App crashes if `DUGOUT_SECRET_KEY` is missing/default; Docker Compose uses `:?` required-variable syntax — no silent insecure deployments |
 | **MLB depth charts for pitcher roles** | API doesn't label every reliever "RP" on active rosters; depth chart gives SP/CP; generic `P` inferred from games-started ratio |
 
 ---
