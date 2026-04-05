@@ -2,77 +2,17 @@
 
 > Full-stack fantasy baseball with RPG equipment, a player-driven coin economy, and in-house ML on real MLB data. **Live production** app behind Docker, PostgreSQL, and Cloudflare (Tunnel + edge TLS).
 
-**[Live app](https://dugoutfantasy.com)** · Private source · [Screenshots](#screenshots) · [Overview](#overview) · [Security](#security--production-hardening) · [Architecture](#architecture) · [ML pipeline](#ml-pipeline) · [System design](#system-design-highlights) · [Economy](#economy--balance-engineering) · [Ops](#operations) · [Testing](#testing)
+**[Live app](https://dugoutfantasy.com)** · Private source · [Screenshots](SCREENSHOTS.md) · [Overview](#overview) · [Security](#security--production-hardening) · [Architecture](#architecture) · [ML pipeline](#ml-pipeline) · [System design](#system-design-highlights) · [Economy](#economy--balance-engineering) · [Ops](#operations) · [Testing](#testing)
 
 ---
 
 ## Screenshots
 
-### Core experience
+| My Team | Live Matchup | Equipment | Shop |
+|---------|-------------|-----------|------|
+| ![My Team](screenshots/my-team.png) | ![Matchup](screenshots/matchup-breakdown.png) | ![Equipment](screenshots/equipment.png) | ![Shop](screenshots/shop-detail.png) |
 
-| Landing | Mode select |
-|---------|-------------|
-| ![Landing](screenshots/landing.png) | ![Mode Select](screenshots/mode-select.png) |
-
-| My Team (roster + gear summary) | Equipment detail (8 slots) |
-|---------------------------------|---------------------------|
-| ![My Team](screenshots/my-team.png) | ![Equipment](screenshots/equipment.png) |
-
-### Live scoring & matchups
-
-| Live Scores | Box score detail |
-|-------------|-----------------|
-| ![Live Scores](screenshots/live-scores.png) | ![Box Score](screenshots/live-boxscore.png) |
-
-| Weekly matchup | Scoring breakdown |
-|----------------|-------------------|
-| ![Matchup](screenshots/matchup.png) | ![Breakdown](screenshots/matchup-breakdown.png) |
-
-### League & standings
-
-| League standings + season controls |
-|------------------------------------|
-| ![League](screenshots/league.png) |
-
-### Gear system
-
-| Gear locker | Item detail popup |
-|-------------|-------------------|
-| ![Locker](screenshots/locker.png) | ![Locker Detail](screenshots/locker-detail.png) |
-
-| Shop & marketplace | Shop item detail |
-|--------------------|-----------------|
-| ![Shop](screenshots/shop.png) | ![Shop Detail](screenshots/shop-detail.png) |
-
-| Gear catalogue (collection tracker) |
-|--------------------------------------|
-| ![Catalogue](screenshots/gear-catalogue.png) |
-
-### Transactions
-
-| Waiver wire | Drop modal (full roster) |
-|-------------|-------------------------|
-| ![Waivers](screenshots/waivers.png) | ![Drop](screenshots/waiver-drop.png) |
-
-| Trade proposal builder | Outgoing trades |
-|------------------------|-----------------|
-| ![Trade Propose](screenshots/trade-propose.png) | ![Trade Outgoing](screenshots/trade-outgoing.png) |
-
-### Intelligence & research
-
-| ML projections | Lineup optimizer |
-|----------------|-----------------|
-| ![Projections](screenshots/projections.png) | ![Optimizer](screenshots/lineup-optimizer.png) |
-
-| Research (team browser) | Player deep-dive (Statcast + matchup) |
-|-------------------------|---------------------------------------|
-| ![Research](screenshots/research.png) | ![Player](screenshots/research-player.png) |
-
-### Settings & info
-
-| Push notifications | How to Play guide |
-|--------------------|-------------------|
-| ![Notifications](screenshots/notifications.png) | ![Guide](screenshots/guide.png) |
+**[View all 24 screenshots →](SCREENSHOTS.md)** — landing, live scores, box scores, matchups, scoring breakdowns, league standings, gear locker, shop, catalogue, waivers, trades, projections, lineup optimizer, research, player deep-dive, notifications, and more.
 
 ---
 
