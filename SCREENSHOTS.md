@@ -74,7 +74,7 @@ All screenshots from the live production app (mobile PWA).
 
 | Research (Team Browser) | Player Deep-Dive (Statcast + Matchup) |
 |-------------------------|---------------------------------------|
-| ![Research](screenshots/research.png) | ![Player](screenshots/research-player.png) |
+| ![Research](screenshots/research-player.png) | ![Player](screenshots/research.png) |
 
 ---
 

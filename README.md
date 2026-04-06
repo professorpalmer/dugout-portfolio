@@ -152,8 +152,9 @@ Three **`HistGradientBoostingRegressor`** models per player type (hitter/pitcher
 - **Model versioning:** Feature fingerprint (SHA-256 hash of the feature list) is persisted alongside models. On load, stale models are automatically rejected and an immediate retrain is triggered — prevents silent degradation to heuristic after feature list changes
 - **Tier baseline floor:** Stars can't project below 40% of their stats-based estimate — prevents model from sandbagging elite players with small recent samples
 - **League scoring ratio:** Rescales predictions by (league-weights / default-weights) so custom scoring leagues get adjusted projections automatically
+- **Early-season blending:** When game samples are below trust thresholds (30 games for hitters, 15 for pitchers), ML predictions are linearly blended with a stable stats-based prior — `model_weight = min(n_games / trust_games, 1.0)`. Prevents wild quantile ranges on small samples while gracefully handing off to the full model as data accumulates
 - **Heuristic fallback:** When <5 game logs or no trained model, blends tier baseline + season stats + recent trend
-- **Confidence scoring:** Composite of tier bonus, Statcast data availability, stat depth, game log count, and prediction consistency (inverse variance across quantiles)
+- **Confidence scoring:** Composite of tier bonus, Statcast data availability, stat depth, game log count, prediction consistency (inverse variance across quantiles), and early-season model weight — confidence scales with `model_weight` so early-season projections transparently convey lower certainty
 - **Weekly scaling:** Multiplies per-game projection by estimated weekly appearances (hitters: team scheduled games; SP: ~1.2/week; RP: ~60% of team games)
 - **Matchup resolver:** Looks up today's opposing pitcher, computes platoon advantage and opposing-lineup quality from cached Statcast data
 - **Auto-retraining:** Models retrain via joblib persistence after every batch of completed games; startup retrain if persisted models are stale
@@ -230,6 +231,16 @@ Daily processing at **8 AM ET**. Dropped players sit on waivers for **2 days** b
 
 **League-wide rolling 7-day cap** scales with the season: 1 proposal/week early (>10 weeks to playoffs) → 2 mid-season → 3 near playoffs (≤4 weeks). Per-bot attempt chances are low (6–14%) so proposals trickle in organically. Trade matching finds same-position-bucket players within the personality's max projection gap; 60/40 bias toward best trade vs. random. Incoming trade acceptance uses personality-specific `accept_min_ratio` and `accept_min_surplus` thresholds with injury discount. Late Surge bots ramp via a multiplier (1.0× → 1.6×) as playoffs approach.
 
+### Stat correction pipeline
+
+Daily job re-fetches yesterday's box scores from the MLB Stats API and diffs scoring events against persisted `PlayerGameLog` rows. When corrections are detected: individual `UserPlayerGameScore` rows are updated, the **correct historical week's** `WeeklyMatchup` is identified from `game_date` (not just the current week), and points are reconciled — even for already-completed weeks. League-wide notifications announce affected players. Scoring breakdowns in the UI tag corrected games with a "CORRECTED" badge and display per-stat deltas (field, old → new, point impact).
+
+**Week finalization reconciliation:** Before marking a week `completed`, `finalize_week_matchups` re-derives all team points from the authoritative `UserPlayerGameScore` ledger, eliminating floating-point drift between accumulated live accruals and the source-of-truth detail rows.
+
+### Matchup history & score auditing
+
+Clickable matchup history rows expand inline to show the full player-by-player scoring breakdown for any past week — reusing the same detail endpoint and rendering as the current week's view. The history endpoint re-derives the user's own points from the authoritative ledger for all weeks; opponent points use stored (reconciled) values for completed weeks and live re-derivation for the current week.
+
 ### MLB transaction monitoring
 
 Every 15 minutes: poll MLB transactions API for injuries, DFA, trades, activations. Auto-updates player `injury_status` and pushes notifications to roster owners ("Justin Verlander placed on 15-day IL").
@@ -251,8 +262,6 @@ Systematic performance audit across **all 16 backend files** (11 API routes + 5 
 - **League standings** — replaced `N_teams × N_weeks × _derive_week_points()` loop (~300 queries) with a single `SUM(modified_points) GROUP BY user_id` aggregate + one live accrual query
 - **Bot FA ownership checks** — replaced per-player `_player_owned_in_league()` calls (~400–600/bot) with a pre-computed `_owned_player_ids_in_league()` set (2–3 queries total)
 - **`_derive_week_points()`** — the most-called function in the app; refactored from per-slot queries to batch-fetching all `UserPlayerGameScore`, `PlayerGameLog`, and `FantasyLiveAccrual` rows upfront with dict lookups
-
-**Design constraint:** Zero frontend changes, zero new dependencies, identical API response shapes. All 336 tests pass unchanged.
 
 **Estimated capacity impact:** ~10× more concurrent users per DB connection; live scoring no longer saturates the single-instance PostgreSQL during game windows.
 
@@ -324,9 +333,9 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 | Job | Frequency | Purpose |
 |-----|-----------|---------|
 | MLB poll | 60 seconds | Schedule, live accrual, final scoring, SSE broadcasts |
-| Stat corrections | Daily 8 AM ET | Re-fetch yesterday's box scores for MLB corrections |
+| Stat corrections | Daily 8 AM ET | Re-fetch yesterday's box scores for MLB corrections; update historical week matchups by game date; league-wide notifications for affected players |
 | Roster sync | Daily 5 AM ET | Refresh player teams/names, Statcast cache, reclassify, retrain |
-| Weekly advance | Monday 6 AM ET | Finalize week, generate new matchups, advance playoffs |
+| Weekly advance | Monday 6 AM ET | Finalize week (with point reconciliation), generate new matchups, advance playoffs. `scoring_start_date` is anchored to the next Monday after draft completion so all weeks run Monday–Sunday |
 | Bot management | Daily 10 AM ET | Auto-lineup, gear management, bot waivers + trades |
 | Waiver processing | Daily 8 AM ET | Per-league waiver claims + post-waiver bot lineup optimize |
 | Bot economy | 3× daily | Trade inbox resolution + marketplace buy/sell |
@@ -337,7 +346,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 
 ## Testing
 
-**336** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection), classifier, lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), trades, IL management, live accrual reconciliation, gear triggers, and integration-style API flows against SQLite fixtures.
+**364** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight**), classifier, lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), trades, IL management, live accrual reconciliation, gear triggers, and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -375,6 +384,9 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Week-scaled shop pricing** | Price cap ramps with the season (400 → 600 → 1000 → 1500 → uncapped) so early shops are attainable; 1 aspirational "stretch" item per rotation |
 | **Startup secret enforcement** | App crashes if `DUGOUT_SECRET_KEY` is missing/default; Docker Compose uses `:?` required-variable syntax — no silent insecure deployments |
 | **Batch `IN` queries vs. ORM eager loading** | Explicit `WHERE id IN (...)` + dict lookups over SQLAlchemy relationship loading; keeps control of query count, avoids surprise joins, works with SQLModel's session pattern; 16-file audit eliminated 29 N+1 patterns (93–99% query reduction) |
+| **Early-season prior blending** | Linear ramp from heuristic prior to full ML output (30 games hitters, 15 pitchers) prevents wild quantile ranges on small samples; mirrors Yahoo/ESPN approach of trusting prior-season baselines until current-season data is sufficient |
+| **Week-aware stat corrections** | Corrections target the historical week by `game_date` rather than always hitting the current week; combined with finalization reconciliation, ensures completed matchup totals stay accurate retroactively |
+| **Monday-anchored scoring weeks** | `scoring_start_date` always snaps to next Monday after draft, preventing partial first weeks (e.g., drafting Friday and only getting 2 days of scoring) |
 | **MLB depth charts for pitcher roles** | API doesn't label every reliever "RP" on active rosters; depth chart gives SP/CP; generic `P` inferred from games-started ratio |
 
 ---
