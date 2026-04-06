@@ -30,7 +30,7 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **Play-by-play enrichment** — fielding credits (OF catches, double plays), ABS challenge tracking, trailing/go-ahead HR detection, foul ball counting from Statcast.
 - **Unified transactions** for waivers and trades; bots participate in both with personality-driven decision making and season-phase-aware trade throttling.
 - **Research** with MLB schedules, rosters, and **Statcast analytics** (barrel%, xBA, xSLG, xwOBA, platoon splits, park factors) in player deep-dives.
-- **Quantile regression projections** (p10/p50/p90 ranges) with **32 hitter / 20 pitcher features**, Statcast integration, matchup context, and confidence scoring.
+- **Quantile regression projections** (p10/p50/p90 ranges) with **39 hitter / 28 pitcher features**, recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits.
 - **Gear catalogue** tracks collection progress across all ~200 items with challenge conditions and rarity-grouped browsing.
 
 ---
@@ -129,25 +129,34 @@ Multi-layer security posture for a public-facing app with real users:
 
 Three **`HistGradientBoostingRegressor`** models per player type (hitter/pitcher) produce **p10, p50, p90** projection ranges — not just a point estimate.
 
-**Hitter feature set (32 features):**
+**Hitter feature set (39 features):**
 - **17 box-score rolling:** 5-game and 15-game rolling averages for hits, HR, RBI, runs, SB, walks, doubles, fantasy points; season AVG/OBP/SLG; hit streak length; games played
-- **11 Statcast:** xBA, xSLG, xwOBA, BA/SLG/wOBA differentials (expected vs actual), avg exit velocity, barrel%, hard-hit%, sweet-spot%, avg launch angle
-- **4 matchup context:** park factor, platoon advantage flag, opposing pitcher xERA, opposing pitcher xwOBA
+- **11 Statcast season:** xBA, xSLG, xwOBA, BA/SLG/wOBA differentials (expected vs actual), avg exit velocity, barrel%, hard-hit%, sweet-spot%, avg launch angle
+- **5 matchup context:** park factor, platoon advantage flag, opposing pitcher xERA, opposing pitcher xwOBA, **platoon wOBA differential** (player-specific split quality scaled by batting hand)
+- **2 rest/fatigue:** days since last game (capped at 7), games played in trailing 7 days
+- **4 pitch-level rolling (from persisted Statcast game summaries):** recent max exit velocity, recent barrel rate, recent whiff rate, recent hard-hit rate (all 5-game rolling windows)
 
-**Pitcher feature set (20 features):**
+**Pitcher feature set (28 features):**
 - **12 box-score rolling:** 5g/15g rolling IP, K, ER, hits allowed, fantasy pts; season ERA/WHIP; games played
-- **7 Statcast:** xBA/xSLG/xwOBA against, xERA, avg exit velo against, barrel% against, hard-hit% against
-- **1 matchup:** park factor
+- **7 Statcast season:** xBA/xSLG/xwOBA against, xERA, avg exit velo against, barrel% against, hard-hit% against
+- **4 matchup context:** park factor, **opposing team wOBA**, **opposing team K%**, **opposing team barrel%** (aggregated from per-batter Statcast data across the opposing roster)
+- **2 rest/fatigue:** days since last game, games in trailing 7 days
+- **3 pitch-level rolling:** recent average pitch speed, recent whiff rate, recent called-strike percentage (5-start rolling windows from persisted game summaries)
 
 **Key design decisions:**
 - **No-leak training:** Sliding window ensures features only come from games *before* the target game
+- **Recency-weighted training:** Exponential decay sample weights (`0.5^(days_ago / 30)`) — yesterday's game has full weight, a month ago has half weight. Passed to `HistGradientBoostingRegressor.fit()` so the model adapts to recent form
+- **Pitch-level persistence:** Per-game Statcast summaries (exit velo, barrel rate, whiff rate, pitch speed, called-strike%) are stored as JSON on each `PlayerGameLog` row during final scoring, then rolled into 5-game averages at prediction time
+- **Opposing lineup strength:** Pitcher matchup context aggregates the opposing team's batter Statcast data (team wOBA, K%, barrel%) from the already-cached per-player expected stats — no additional API calls
+- **L/R split quality:** Replaces the simple ±1.0 platoon flag with a continuous `platoon_woba_diff` scaled by each batter's individual xwOBA and batting hand
+- **Model versioning:** Feature fingerprint (SHA-256 hash of the feature list) is persisted alongside models. On load, stale models are automatically rejected and an immediate retrain is triggered — prevents silent degradation to heuristic after feature list changes
 - **Tier baseline floor:** Stars can't project below 40% of their stats-based estimate — prevents model from sandbagging elite players with small recent samples
 - **League scoring ratio:** Rescales predictions by (league-weights / default-weights) so custom scoring leagues get adjusted projections automatically
 - **Heuristic fallback:** When <5 game logs or no trained model, blends tier baseline + season stats + recent trend
 - **Confidence scoring:** Composite of tier bonus, Statcast data availability, stat depth, game log count, and prediction consistency (inverse variance across quantiles)
 - **Weekly scaling:** Multiplies per-game projection by estimated weekly appearances (hitters: team scheduled games; SP: ~1.2/week; RP: ~60% of team games)
-- **Matchup resolver:** Looks up today's opposing pitcher, computes platoon advantage (+1.0 opposite hand, −0.5 same, +0.3 switch hitter)
-- **Auto-retraining:** Models retrain via joblib persistence after every batch of completed games
+- **Matchup resolver:** Looks up today's opposing pitcher, computes platoon advantage and opposing-lineup quality from cached Statcast data
+- **Auto-retraining:** Models retrain via joblib persistence after every batch of completed games; startup retrain if persisted models are stale
 
 ### 2. Tier classification
 
@@ -275,7 +284,11 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 - **Batter:** max exit velo, max HR distance, max pitch speed faced, estimated foul balls (from pitch descriptions), total pitches seen, barrel count, hard-hit count
 - **Pitcher:** max/avg pitch speed, total pitches thrown, whiff count, called strike count
 
-Statcast data feeds into projections (11 hitter / 7 pitcher features), the research player deep-dive UI, and gear trigger conditions.
+**Persisted game summaries** (stored as JSON on each `PlayerGameLog` for ML feature extraction):
+- **Batter:** max exit velo, barrel rate per PA, whiff rate, hard-hit rate
+- **Pitcher:** avg pitch speed, whiff rate, called-strike percentage
+
+Statcast data feeds into projections (15 hitter / 14 pitcher features), the research player deep-dive UI, gear trigger conditions, and team-level opposing-lineup quality aggregates.
 
 ---
 
@@ -295,14 +308,14 @@ Statcast data feeds into projections (11 hitter / 7 pitcher features), the resea
 | Bot management | Daily 10 AM ET | Auto-lineup, gear management, bot waivers + trades |
 | Waiver processing | Daily 8 AM ET | Per-league waiver claims + post-waiver bot lineup optimize |
 | Bot economy | 3× daily | Trade inbox resolution + marketplace buy/sell |
-| Game reminders | 4× daily | Push notifications for upcoming player games |
+| Game reminders | Every 15 min | Smart daily alert when roster players' games are about to start; deduped to one per user per day |
 | MLB transactions | Every 15 min | Injury/DFA/trade updates, pushes to roster owners |
 
 ---
 
 ## Testing
 
-**318** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections, classifier, lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), trades, IL management, live accrual reconciliation, gear triggers, and integration-style API flows against SQLite fixtures.
+**336** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection), classifier, lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), trades, IL management, live accrual reconciliation, gear triggers, and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -327,7 +340,7 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **SSE vs WebSocket** | One-way push for scores/draft; mutations stay on REST |
 | **In-memory draft** | Latency and timer accuracy; acceptable ephemeral state |
 | **Quantile regression (p10/p50/p90)** | Projection ranges let the UI show confidence intervals and the optimizer account for variance |
-| **32 hitter / 20 pitcher features** | Enough signal from rolling stats + Statcast + matchup context without overfitting on ~150 games of training data |
+| **39 hitter / 28 pitcher features** | Five feature categories (box-score rolling, Statcast season, matchup context, rest/fatigue, pitch-level rolling) provide strong signal without overfitting; recency-weighted training adapts to recent form; model fingerprinting prevents silent degradation on feature list changes |
 | **Greedy lineup optimizer** | Fast enough for interactive use vs. exponential exact search |
 | **JWT-gated reads** | Shrinks anonymous scraping / abuse surface at scale |
 | **Admin key for dangerous routes** | Maintenance without exposing "hidden" power endpoints |
