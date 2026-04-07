@@ -30,7 +30,7 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **Play-by-play enrichment** — fielding credits (OF catches, double plays), ABS challenge tracking, trailing/go-ahead HR detection, foul ball counting from Statcast.
 - **Unified transactions** for waivers and trades; bots participate in both with personality-driven decision making and season-phase-aware trade throttling.
 - **Research** with MLB schedules, rosters, and **Statcast analytics** (barrel%, xBA, xSLG, xwOBA, platoon splits, park factors) in player deep-dives.
-- **Quantile regression projections** (p10/p50/p90 ranges) with **39 hitter / 28 pitcher features**, recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits.
+- **Marcel-anchored ML projections** (p10/p50/p90 ranges) with a 5-layer architecture: Marcel multi-year baseline → in-season blend → Statcast luck correction → gradient-boosted context adjustment (**39 hitter / 28 pitcher features**) → range construction. Recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits.
 - **Gear catalogue** tracks collection progress across all ~200 items with challenge conditions and rarity-grouped browsing.
 
 ---
@@ -125,41 +125,69 @@ Multi-layer security posture for a public-facing app with real users:
 
 ## ML pipeline
 
-### 1. Player projections — quantile gradient boosting
+### 1. Player projections — Marcel-anchored ML
 
-Three **`HistGradientBoostingRegressor`** models per player type (hitter/pitcher) produce **p10, p50, p90** projection ranges — not just a point estimate.
+Five-layer projection architecture combining sabermetric priors with gradient-boosted ML, modeled after how professional systems (ZiPS, Steamer) blend actuarial baselines with in-season data:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 1 — Marcel Baseline                                   │
+│  PlayerSeasonStats (2023–2025) → 5/4/3 year weighting →     │
+│  regression to mean → age adjustment                         │
+├─────────────────────────────────────────────────────────────┤
+│  Layer 2 — In-Season Blend                                   │
+│  Marcel anchor + 2026 game logs (0% → 65% ramp over 80 G)  │
+├─────────────────────────────────────────────────────────────┤
+│  Layer 3 — Statcast Luck Correction                          │
+│  xBA/xSLG/xERA vs actual → ±15% adjustment                  │
+├─────────────────────────────────────────────────────────────┤
+│  Layer 4 — ML Context Adjustment                             │
+│  HistGradientBoostingRegressor p10/p50/p90 (39H / 28P       │
+│  features) → clamped ±25–35% nudge on anchor                 │
+├─────────────────────────────────────────────────────────────┤
+│  Layer 5 — Range Construction                                │
+│  p10/p90 from ML quantiles or sensible anchor-based defaults │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Layer 1 — Marcel baseline:** Multi-year weighted projection using `PlayerSeasonStats` (2023–2025). Weights years 5/4/3 (most recent heaviest), regresses rate stats toward league average based on **raw** career volume (not inflated by year weights), and applies an age curve from `Player.birth_year`. Two-way players get combined `hitting_value + (pitching_value × starts_per_game_ratio)` — their full fantasy value, not just one side.
+
+**Layer 2 — In-season blend:** As 2026 game logs accumulate, blends the Marcel baseline with actual `PlayerGameLog` performance. Ramp: 0% actual at 0 games → 65% actual at 80 games. Prevents early-season volatility from overriding multi-year track records.
+
+**Layer 3 — Statcast enhancement:** Applies "luck correction" adjustments (up to ±15%) based on differentials between expected stats (xBA, xSLG, xERA from pybaseball) and actual stats. A hitter with a .220 BA but .280 xBA gets an upward nudge — their batted ball quality suggests regression toward better results.
+
+**Layer 4 — ML context adjustment:** Three **`HistGradientBoostingRegressor`** models per player type (hitter/pitcher) produce **p10, p50, p90** quantile predictions. The ML p50 is used as a contextual "nudge" (clamped ±25–35%) on the Statcast-enhanced anchor — not as the sole prediction.
+
+**Layer 5 — Range construction:** p10/p90 from ML quantile models or sensible defaults based on the enhanced anchor.
 
 **Hitter feature set (39 features):**
-- **17 box-score rolling:** 5-game and 15-game rolling averages for hits, HR, RBI, runs, SB, walks, doubles, fantasy points; season AVG/OBP/SLG; hit streak length; games played
-- **11 Statcast season:** xBA, xSLG, xwOBA, BA/SLG/wOBA differentials (expected vs actual), avg exit velocity, barrel%, hard-hit%, sweet-spot%, avg launch angle
-- **5 matchup context:** park factor, platoon advantage flag, opposing pitcher xERA, opposing pitcher xwOBA, **platoon wOBA differential** (player-specific split quality scaled by batting hand)
-- **2 rest/fatigue:** days since last game (capped at 7), games played in trailing 7 days
-- **4 pitch-level rolling (from persisted Statcast game summaries):** recent max exit velocity, recent barrel rate, recent whiff rate, recent hard-hit rate (all 5-game rolling windows)
+- **17 box-score rolling:** 5g/15g rolling averages for hits, HR, RBI, runs, SB, walks, doubles, fantasy points; season AVG/OBP/SLG; hit streak length; games played
+- **11 Statcast season:** xBA, xSLG, xwOBA, BA/SLG/wOBA differentials, avg exit velocity, barrel%, hard-hit%, sweet-spot%, avg launch angle
+- **5 matchup context:** park factor, platoon advantage, opposing pitcher xERA/xwOBA, **platoon wOBA differential** (player-specific split quality)
+- **2 rest/fatigue:** days since last game, games in trailing 7 days
+- **4 pitch-level rolling:** recent max exit velocity, barrel rate, whiff rate, hard-hit rate (5-game windows from persisted Statcast game summaries)
 
 **Pitcher feature set (28 features):**
 - **12 box-score rolling:** 5g/15g rolling IP, K, ER, hits allowed, fantasy pts; season ERA/WHIP; games played
 - **7 Statcast season:** xBA/xSLG/xwOBA against, xERA, avg exit velo against, barrel% against, hard-hit% against
-- **4 matchup context:** park factor, **opposing team wOBA**, **opposing team K%**, **opposing team barrel%** (aggregated from per-batter Statcast data across the opposing roster)
+- **4 matchup context:** park factor, **opposing team wOBA/K%/barrel%** (aggregated from per-batter Statcast)
 - **2 rest/fatigue:** days since last game, games in trailing 7 days
-- **3 pitch-level rolling:** recent average pitch speed, recent whiff rate, recent called-strike percentage (5-start rolling windows from persisted game summaries)
+- **3 pitch-level rolling:** avg pitch speed, whiff rate, called-strike% (5-start windows)
 
 **Key design decisions:**
+- **Marcel methodology:** Industry-standard approach (Tango/Lichtman) — 5/4/3 year weighting, regression to the mean proportional to sample size, age adjustment. The same foundation ZiPS and Steamer use, implemented from scratch against `PlayerSeasonStats`
+- **Raw volume for reliability:** Career IP/PA (not year-weighted) determines how much to regress. Prevents a 96 IP career pitcher from being treated like a 480 IP veteran just because `5 × 96 = 480`
+- **Two-way player handling:** TWP players get combined hitting + prorated pitching value — Ohtani's full fantasy value, not just one half
 - **No-leak training:** Sliding window ensures features only come from games *before* the target game
-- **Recency-weighted training:** Exponential decay sample weights (`0.5^(days_ago / 30)`) — yesterday's game has full weight, a month ago has half weight. Passed to `HistGradientBoostingRegressor.fit()` so the model adapts to recent form
-- **Pitch-level persistence:** Per-game Statcast summaries (exit velo, barrel rate, whiff rate, pitch speed, called-strike%) are stored as JSON on each `PlayerGameLog` row during final scoring, then rolled into 5-game averages at prediction time
-- **Opposing lineup strength:** Pitcher matchup context aggregates the opposing team's batter Statcast data (team wOBA, K%, barrel%) from the already-cached per-player expected stats — no additional API calls
-- **L/R split quality:** Replaces the simple ±1.0 platoon flag with a continuous `platoon_woba_diff` scaled by each batter's individual xwOBA and batting hand
-- **Model versioning:** Feature fingerprint (SHA-256 hash of the feature list) is persisted alongside models. On load, stale models are automatically rejected and an immediate retrain is triggered — prevents silent degradation to heuristic after feature list changes
-- **Tier baseline floor:** Stars can't project below 40% of their stats-based estimate — prevents model from sandbagging elite players with small recent samples
-- **League scoring ratio:** Rescales predictions by (league-weights / default-weights) so custom scoring leagues get adjusted projections automatically
-- **Early-season blending:** When game samples are below trust thresholds (30 games for hitters, 15 for pitchers), ML predictions are linearly blended with a stable stats-based prior — `model_weight = min(n_games / trust_games, 1.0)`. Prevents wild quantile ranges on small samples while gracefully handing off to the full model as data accumulates
-- **Heuristic fallback:** When <5 game logs or no trained model, blends tier baseline + season stats + recent trend
-- **Confidence scoring:** Composite of tier bonus, Statcast data availability, stat depth, game log count, prediction consistency (inverse variance across quantiles), and early-season model weight — confidence scales with `model_weight` so early-season projections transparently convey lower certainty
-- **Weekly scaling:** Multiplies per-game projection by estimated weekly appearances (hitters: team scheduled games; SP: ~1.2/week; RP: ~60% of team games)
-- **Matchup resolver:** Looks up today's opposing pitcher, computes platoon advantage and opposing-lineup quality from cached Statcast data
-- **Auto-retraining:** Models retrain via joblib persistence after every batch of completed games; startup retrain if persisted models are stale
+- **Recency-weighted training:** Exponential decay sample weights (`0.5^(days_ago / 30)`) passed to `HistGradientBoostingRegressor.fit()`
+- **Model versioning:** Feature fingerprint (SHA-256) persisted alongside models; stale models auto-rejected with immediate retrain — prevents silent degradation
+- **Confidence scoring:** Composite of Marcel data availability, Statcast coverage, game log count, prediction consistency (inverse quantile variance), and in-season blend weight
+- **League scoring ratio:** Rescales predictions by (league-weights / default-weights) so custom scoring leagues get adjusted projections
+- **Weekly scaling:** per-game projection × estimated weekly appearances (hitters: team games; SP: ~1.2/week; RP: ~60% of team games)
+- **Matchup resolver:** Today's opposing pitcher, platoon advantage, opposing-lineup quality from cached Statcast
+- **Auto-retraining:** Models retrain via joblib after every batch of completed games; startup retrain if stale
 
-### 2. Tier classification
+### 2. Tier classification & pitcher role assignment
 
 Role-aware **absolute thresholds** on `projected_pts_per_game` with separate cutoffs per pool:
 
@@ -169,7 +197,24 @@ Role-aware **absolute thresholds** on `projected_pts_per_game` with separate cut
 | SP | ≥ 14.0 | ≥ 8.0 | ≥ 4.0 | < 4.0 |
 | RP | ≥ 6.0 | ≥ 3.5 | ≥ 2.0 | < 2.0 |
 
-**Guards:** Small-sample cap (HR<5, RBI<15 → can't be Star/Starter); everyday floor (120+ games → can't fall below Platoon). Tiers feed loot rarity gates, draft auction valuations, and projection confidence.
+**Career volume guards:** Projection-based tiers are capped by career volume thresholds from `PlayerSeasonStats`. A pitcher can't be Star with < 150 career IP (starters) or < 50 IP (relievers); a hitter can't be Star with < 400 career PA. This prevents small-sample overconfidence — a prospect with 96 career IP who projects well still caps at Starter until they prove durability.
+
+**Two-way player handling:** TWP players (Ohtani) are always classified as hitters for tiering purposes — their pitching adds value but shouldn't push them into SP-tier thresholds where combined value doesn't reach "Star." The Marcel projection already combines both sides, so the hitter threshold captures their full fantasy impact.
+
+**Granular pitcher roles (`PitcherRole`):** Beyond SP/RP, every pitcher is classified into one of 6 roles based on aggregated `PlayerSeasonStats`:
+
+| Role | Criteria |
+|------|----------|
+| **STARTER** | ≥ 50% games started |
+| **CLOSER** | < 50% GS, ≥ 10 career saves |
+| **SETUP_MAN** | RP with ≥ 1.0 IP/appearance and high K rate (≥ 0.8 K/IP) |
+| **SWINGMAN** | RP with ≥ 1.5 IP/appearance (long relief / spot starts) |
+| **MIDDLE_RELIEVER** | Default RP classification |
+| **UNKNOWN** | Insufficient data |
+
+Pitcher roles feed into **gear equip restrictions** (Saves+ gear only on closers/setup men, Wins+ only on starters/swingmen) and loot drop pool filtering.
+
+**Other guards:** Small-sample cap (HR<5, RBI<15 → can't be Star/Starter); everyday floor (120+ games → can't fall below Platoon). Tiers feed loot rarity gates, draft auction valuations, and projection confidence.
 
 ### 3. Auction pricing engine
 
@@ -231,15 +276,14 @@ Daily processing at **8 AM ET**. Dropped players sit on waivers for **2 days** b
 
 **League-wide rolling 7-day cap** scales with the season: 1 proposal/week early (>10 weeks to playoffs) → 2 mid-season → 3 near playoffs (≤4 weeks). Per-bot attempt chances are low (6–14%) so proposals trickle in organically. Trade matching finds same-position-bucket players within the personality's max projection gap; 60/40 bias toward best trade vs. random. Incoming trade acceptance uses personality-specific `accept_min_ratio` and `accept_min_surplus` thresholds with injury discount. Late Surge bots ramp via a multiplier (1.0× → 1.6×) as playoffs approach.
 
-### Stat correction pipeline
+### Trade-waiver conflict guards
 
-Daily job re-fetches yesterday's box scores from the MLB Stats API and diffs scoring events against persisted `PlayerGameLog` rows. When corrections are detected: individual `UserPlayerGameScore` rows are updated, the **correct historical week's** `WeeklyMatchup` is identified from `game_date` (not just the current week), and points are reconciled — even for already-completed weeks. League-wide notifications announce affected players. Scoring breakdowns in the UI tag corrected games with a "CORRECTED" badge and display per-stat deltas (field, old → new, point impact).
+When a player is involved in both pending trades and waiver claims, the system resolves conflicts chronologically without blocking either flow:
 
-**Week finalization reconciliation:** Before marking a week `completed`, `finalize_week_matchups` re-derives all team points from the authoritative `UserPlayerGameScore` ledger, eliminating floating-point drift between accumulated live accruals and the source-of-truth detail rows.
-
-### Matchup history & score auditing
-
-Clickable matchup history rows expand inline to show the full player-by-player scoring breakdown for any past week — reusing the same detail endpoint and rendering as the current week's view. The history endpoint re-derives the user's own points from the authoritative ledger for all weeks; opponent points use stored (reconciled) values for completed weeks and live re-derivation for the current week.
+- **Waiver drop of a traded-away player:** When a trade resolves and a player moves to a new team, any pending trade proposals from the original owner that include that player are **auto-cancelled** with a notification explaining why.
+- **Trade proposal for a waivered player:** If a user drops a player to waivers while they have pending trade proposals involving that player, the proposals stay open until trade resolution time. At resolution, the system detects the player is no longer on the proposer's roster and cancels the affected proposals.
+- **Multiple overlapping proposals:** Users can open 12 trade proposals involving the same player. If that player gets waivered, all affected proposals are cleaned up at the next trade resolution cycle — no manual intervention needed.
+- **Waiver claim on a player in a pending trade:** The waiver system checks roster state at processing time (8 AM ET), not at claim time. If a trade moved the player before waivers process, the claim is voided.
 
 ### MLB transaction monitoring
 
@@ -262,6 +306,8 @@ Systematic performance audit across **all 16 backend files** (11 API routes + 5 
 - **League standings** — replaced `N_teams × N_weeks × _derive_week_points()` loop (~300 queries) with a single `SUM(modified_points) GROUP BY user_id` aggregate + one live accrual query
 - **Bot FA ownership checks** — replaced per-player `_player_owned_in_league()` calls (~400–600/bot) with a pre-computed `_owned_player_ids_in_league()` set (2–3 queries total)
 - **`_derive_week_points()`** — the most-called function in the app; refactored from per-slot queries to batch-fetching all `UserPlayerGameScore`, `PlayerGameLog`, and `FantasyLiveAccrual` rows upfront with dict lookups
+
+**Design constraint:** Zero frontend changes, zero new dependencies, identical API response shapes. All 494 tests pass unchanged.
 
 **Estimated capacity impact:** ~10× more concurrent users per DB connection; live scoring no longer saturates the single-instance PostgreSQL during game windows.
 
@@ -286,6 +332,8 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 
 1. **Challenge triggers:** specific stat lines unlock specific items (e.g. "3+ hits, 0 walks" → Molitor's Iron Band). ABS challenges, trailing HRs, fielding plays, day/night games, and doubleheaders all factor into trigger conditions.
 2. **Rarity rolls:** when a player exceeds their projection (threshold varies by tier: bench 1.15×, star 1.30×), a weighted random roll picks a rarity. **Tier-weighted rarity** gives bench/platoon players lower thresholds and an uncommon floor (never roll Common from projection beats).
+
+**Role-based loot filtering:** Loot drop pools are filtered by `PitcherRole` — a closer never rolls Wins+ or Quality Start gear, a starter never rolls Saves+ gear. Position-aware restrictions also prevent hitting-stat gear (HR+, SB+) from dropping for pure pitchers and pitching-stat gear from dropping for pure hitters. Two-way players are eligible for both pools. The same restrictions apply at the equip endpoint and for bot gear assignment.
 
 **Streak triggers** span multiple games: 10+ hit streak, 7/15/20 consecutive starts, 5+ consecutive SB without CS, 3+ weekly saves, 5-game HR streak, 3+ consecutive matchup wins.
 
@@ -333,9 +381,9 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 | Job | Frequency | Purpose |
 |-----|-----------|---------|
 | MLB poll | 60 seconds | Schedule, live accrual, final scoring, SSE broadcasts |
-| Stat corrections | Daily 8 AM ET | Re-fetch yesterday's box scores for MLB corrections; update historical week matchups by game date; league-wide notifications for affected players |
-| Roster sync | Daily 5 AM ET | Refresh player teams/names, Statcast cache, reclassify, retrain |
-| Weekly advance | Monday 6 AM ET | Finalize week (with point reconciliation), generate new matchups, advance playoffs. `scoring_start_date` is anchored to the next Monday after draft completion so all weeks run Monday–Sunday |
+| Stat corrections | Daily 8 AM ET | Re-fetch yesterday's box scores for MLB corrections |
+| Roster sync | Daily 5 AM ET | Refresh player teams/names, Statcast cache, reclassify tiers + pitcher roles, retrain ML models |
+| Weekly advance | Monday 6 AM ET | Finalize week (with point reconciliation), generate new matchups, advance playoffs. `scoring_start_date` defaults to the day after draft; all weeks run Monday–Sunday with dynamic calculation from `scoring_start_date + (current_week - 1) × 7 days` |
 | Bot management | Daily 10 AM ET | Auto-lineup, gear management, bot waivers + trades |
 | Waiver processing | Daily 8 AM ET | Per-league waiver claims + post-waiver bot lineup optimize |
 | Bot economy | 3× daily | Trade inbox resolution + marketplace buy/sell |
@@ -346,7 +394,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 
 ## Testing
 
-**364** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight**), classifier, lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), trades, IL management, live accrual reconciliation, gear triggers, and integration-style API flows against SQLite fixtures.
+**494** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops), and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -370,8 +418,9 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 |----------|-----------|
 | **SSE vs WebSocket** | One-way push for scores/draft; mutations stay on REST |
 | **In-memory draft** | Latency and timer accuracy; acceptable ephemeral state |
-| **Quantile regression (p10/p50/p90)** | Projection ranges let the UI show confidence intervals and the optimizer account for variance |
+| **Marcel-anchored ML (5 layers)** | Industry-standard Marcel baseline (Tango/Lichtman methodology) prevents early-season volatility; ML acts as a contextual nudge rather than sole predictor — same foundation ZiPS/Steamer use, with in-season game log blending, Statcast luck correction, and quantile ranges (p10/p50/p90) for confidence intervals |
 | **39 hitter / 28 pitcher features** | Five feature categories (box-score rolling, Statcast season, matchup context, rest/fatigue, pitch-level rolling) provide strong signal without overfitting; recency-weighted training adapts to recent form; model fingerprinting prevents silent degradation on feature list changes |
+| **Raw career volume for reliability** | Marcel regression uses raw career IP/PA (not year-weighted totals) to determine how much to regress to the mean — prevents a 96 IP career pitcher from being treated like a 480 IP veteran just because `5 × 96 = 480` |
 | **Greedy lineup optimizer** | Fast enough for interactive use vs. exponential exact search |
 | **JWT-gated reads** | Shrinks anonymous scraping / abuse surface at scale |
 | **Admin key for dangerous routes** | Maintenance without exposing "hidden" power endpoints |
@@ -384,10 +433,10 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Week-scaled shop pricing** | Price cap ramps with the season (400 → 600 → 1000 → 1500 → uncapped) so early shops are attainable; 1 aspirational "stretch" item per rotation |
 | **Startup secret enforcement** | App crashes if `DUGOUT_SECRET_KEY` is missing/default; Docker Compose uses `:?` required-variable syntax — no silent insecure deployments |
 | **Batch `IN` queries vs. ORM eager loading** | Explicit `WHERE id IN (...)` + dict lookups over SQLAlchemy relationship loading; keeps control of query count, avoids surprise joins, works with SQLModel's session pattern; 16-file audit eliminated 29 N+1 patterns (93–99% query reduction) |
-| **Early-season prior blending** | Linear ramp from heuristic prior to full ML output (30 games hitters, 15 pitchers) prevents wild quantile ranges on small samples; mirrors Yahoo/ESPN approach of trusting prior-season baselines until current-season data is sufficient |
-| **Week-aware stat corrections** | Corrections target the historical week by `game_date` rather than always hitting the current week; combined with finalization reconciliation, ensures completed matchup totals stay accurate retroactively |
-| **Monday-anchored scoring weeks** | `scoring_start_date` always snaps to next Monday after draft, preventing partial first weeks (e.g., drafting Friday and only getting 2 days of scoring) |
-| **MLB depth charts for pitcher roles** | API doesn't label every reliever "RP" on active rosters; depth chart gives SP/CP; generic `P` inferred from games-started ratio |
+| **Granular pitcher role classification** | 6-role `PitcherRole` enum (SP/CL/SU/MR/SW/UNK) from aggregated `PlayerSeasonStats` (GS/GP ratio, saves, IP/appearance, K rate); feeds gear equip restrictions so closers never get Wins+ gear and starters never get Saves+ gear |
+| **Career volume guards for tiers** | Hitters need 400+ career PA, starters 150+ career IP, relievers 50+ career IP to reach Star tier — prevents small-sample overconfidence from prospects with hot starts |
+| **Trade-waiver conflict resolution** | Chronological serving instead of blocking; overlapping proposals auto-cancel at resolution time when a player is no longer on the roster; supports 12+ open proposals for the same player without deadlocking |
+| **Dynamic week calculation** | Scoring weeks derived from `scoring_start_date` and `current_week` at runtime — no hardcoded calendar; `scoring_start_date` defaults to the day after draft so users don't miss games already underway; all weeks run Monday–Sunday with short first weeks for mid-week drafts |
 
 ---
 
