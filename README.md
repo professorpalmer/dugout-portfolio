@@ -176,7 +176,7 @@ Five-layer projection architecture combining sabermetric priors with gradient-bo
 
 **Key design decisions:**
 - **Marcel methodology:** Industry-standard approach (Tango/Lichtman) — 5/4/3 year weighting, regression to the mean proportional to sample size, age adjustment. The same foundation ZiPS and Steamer use, implemented from scratch against `PlayerSeasonStats`
-- **Raw volume for reliability:** Career IP/PA (not year-weighted) determines how much to regress. Prevents a 96 IP career pitcher from being treated like a 480 IP veteran just because `5 × 96 = 480`
+- **Raw volume for reliability:** Career IP/PA (not year-weighted) determines how much to regress. Starters use a 400 IP denominator; **relievers use 150 IP** (calibrated for ~60 IP/year closers vs ~180 IP/year starters). Without this, a closer with 150 career IP gets 0.38 reliability and ~65% of their elite K/save rates regressed to mediocre league averages
 - **Two-way player handling:** TWP players get combined hitting + prorated pitching value — Ohtani's full fantasy value, not just one half
 - **No-leak training:** Sliding window ensures features only come from games *before* the target game
 - **Recency-weighted training:** Exponential decay sample weights (`0.5^(days_ago / 30)`) passed to `HistGradientBoostingRegressor.fit()`
@@ -307,7 +307,7 @@ Systematic performance audit across **all 16 backend files** (11 API routes + 5 
 - **Bot FA ownership checks** — replaced per-player `_player_owned_in_league()` calls (~400–600/bot) with a pre-computed `_owned_player_ids_in_league()` set (2–3 queries total)
 - **`_derive_week_points()`** — the most-called function in the app; refactored from per-slot queries to batch-fetching all `UserPlayerGameScore`, `PlayerGameLog`, and `FantasyLiveAccrual` rows upfront with dict lookups
 
-**Design constraint:** Zero frontend changes, zero new dependencies, identical API response shapes. All 494 tests pass unchanged.
+**Design constraint:** Zero frontend changes, zero new dependencies, identical API response shapes. All 504 tests pass unchanged.
 
 **Estimated capacity impact:** ~10× more concurrent users per DB connection; live scoring no longer saturates the single-instance PostgreSQL during game windows.
 
@@ -394,7 +394,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 
 ## Testing
 
-**494** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops), and integration-style API flows against SQLite fixtures.
+**504** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops), and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -420,7 +420,7 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **In-memory draft** | Latency and timer accuracy; acceptable ephemeral state |
 | **Marcel-anchored ML (5 layers)** | Industry-standard Marcel baseline (Tango/Lichtman methodology) prevents early-season volatility; ML acts as a contextual nudge rather than sole predictor — same foundation ZiPS/Steamer use, with in-season game log blending, Statcast luck correction, and quantile ranges (p10/p50/p90) for confidence intervals |
 | **39 hitter / 28 pitcher features** | Five feature categories (box-score rolling, Statcast season, matchup context, rest/fatigue, pitch-level rolling) provide strong signal without overfitting; recency-weighted training adapts to recent form; model fingerprinting prevents silent degradation on feature list changes |
-| **Raw career volume for reliability** | Marcel regression uses raw career IP/PA (not year-weighted totals) to determine how much to regress to the mean — prevents a 96 IP career pitcher from being treated like a 480 IP veteran just because `5 × 96 = 480` |
+| **Role-aware reliability denominators** | Marcel regression uses raw career IP/PA with **separate denominators by role**: 400 IP for starters, **150 IP for relievers**, 1200 PA for hitters. Closers who throw 60 IP/year were getting 0.30 reliability (70% regression to league average) under the starter denominator — now a 150 IP closer gets 1.0 reliability and their elite rates are fully trusted |
 | **Greedy lineup optimizer** | Fast enough for interactive use vs. exponential exact search |
 | **JWT-gated reads** | Shrinks anonymous scraping / abuse surface at scale |
 | **Admin key for dangerous routes** | Maintenance without exposing "hidden" power endpoints |
