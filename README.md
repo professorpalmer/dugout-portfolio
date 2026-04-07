@@ -32,6 +32,8 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **Research** with MLB schedules, rosters, and **Statcast analytics** (barrel%, xBA, xSLG, xwOBA, platoon splits, park factors) in player deep-dives.
 - **Marcel-anchored ML projections** (p10/p50/p90 ranges) with a 5-layer architecture: Marcel multi-year baseline → in-season blend → Statcast luck correction → gradient-boosted context adjustment (**39 hitter / 28 pitcher features**) → range construction. Recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits.
 - **Gear catalogue** tracks collection progress across all ~200 items with challenge conditions and rarity-grouped browsing.
+- **Precision gear display** — every gear card shows the true effective boost after diminishing returns, not raw template values. Two-decimal precision across all surfaces (trophy case, locker, shop, catalogue, detail modals).
+- **Slot occupancy indicators** in the Move Position menu — open slots highlighted green, occupied slots dimmed with the current player's name — so lineup decisions never require scrolling.
 
 ---
 
@@ -162,7 +164,7 @@ Five-layer projection architecture combining sabermetric priors with gradient-bo
 
 **Hitter feature set (39 features):**
 - **17 box-score rolling:** 5g/15g rolling averages for hits, HR, RBI, runs, SB, walks, doubles, fantasy points; season AVG/OBP/SLG; hit streak length; games played
-- **11 Statcast season:** xBA, xSLG, xwOBA, BA/SLG/wOBA differentials, avg exit velocity, barrel%, hard-hit%, sweet-spot%, avg launch angle
+- **11 Statcast season:** xBA, xSLG, xwOBA, BA/SLG/wOBA differentials (expected vs actual), avg exit velocity, barrel%, hard-hit%, sweet-spot%, avg launch angle
 - **5 matchup context:** park factor, platoon advantage, opposing pitcher xERA/xwOBA, **platoon wOBA differential** (player-specific split quality)
 - **2 rest/fatigue:** days since last game, games in trailing 7 days
 - **4 pitch-level rolling:** recent max exit velocity, barrel rate, whiff rate, hard-hit rate (5-game windows from persisted Statcast game summaries)
@@ -272,6 +274,8 @@ Event detection runs inside the accrual loop: HRs (including multi-HR games), tr
 
 Daily processing at **8 AM ET**. Dropped players sit on waivers for **2 days** before becoming free agents. Bot waiver engine runs in phases: replace injured starters → fill empty slots by positional need → positional rebalancing → upgrade worst bench player. Tier-aware drop protection (Stars never droppable; Starters require 3× projection margin). Value Hunter bots stash IL-eligible Stars/Starters.
 
+**Waiver hold visibility:** Player search results surface waiver hold status inline — users see when a recently dropped player becomes available without navigating away. Enhanced denial notifications explain *why* a claim was denied (hold window, roster cap, position eligibility) so users aren't left guessing.
+
 ### Bot trade engine
 
 **League-wide rolling 7-day cap** scales with the season: 1 proposal/week early (>10 weeks to playoffs) → 2 mid-season → 3 near playoffs (≤4 weeks). Per-bot attempt chances are low (6–14%) so proposals trickle in organically. Trade matching finds same-position-bucket players within the personality's max projection gap; 60/40 bias toward best trade vs. random. Incoming trade acceptance uses personality-specific `accept_min_ratio` and `accept_min_surplus` thresholds with injury discount. Late Surge bots ramp via a multiplier (1.0× → 1.6×) as playoffs approach.
@@ -285,15 +289,25 @@ When a player is involved in both pending trades and waiver claims, the system r
 - **Multiple overlapping proposals:** Users can open 12 trade proposals involving the same player. If that player gets waivered, all affected proposals are cleaned up at the next trade resolution cycle — no manual intervention needed.
 - **Waiver claim on a player in a pending trade:** The waiver system checks roster state at processing time (8 AM ET), not at claim time. If a trade moved the player before waivers process, the claim is voided.
 
+### Stat correction pipeline
+
+Daily job re-fetches yesterday's box scores from the MLB Stats API and diffs scoring events against persisted `PlayerGameLog` rows. When corrections are detected: individual `UserPlayerGameScore` rows are updated, the **correct historical week's** `WeeklyMatchup` is identified from `game_date` (not just the current week), and points are reconciled — even for already-completed weeks. League-wide notifications announce affected players. Scoring breakdowns in the UI tag corrected games with a "CORRECTED" badge and display per-stat deltas (field, old → new, point impact).
+
+**Week finalization reconciliation:** Before marking a week `completed`, `finalize_week_matchups` re-derives all team points from the authoritative `UserPlayerGameScore` ledger, eliminating floating-point drift between accumulated live accruals and the source-of-truth detail rows.
+
+### Matchup history & score auditing
+
+Clickable matchup history rows expand inline to show the full player-by-player scoring breakdown for any past week — reusing the same detail endpoint and rendering as the current week's view. The history endpoint re-derives the user's own points from the authoritative ledger for all weeks; opponent points use stored (reconciled) values for completed weeks and live re-derivation for the current week.
+
 ### MLB transaction monitoring
 
 Every 15 minutes: poll MLB transactions API for injuries, DFA, trades, activations. Auto-updates player `injury_status` and pushes notifications to roster owners ("Justin Verlander placed on 15-day IL").
 
 ### N+1 query elimination (full-app audit)
 
-Systematic performance audit across **all 16 backend files** (11 API routes + 5 background services) replaced per-item `session.get()` / `session.exec()` calls inside loops with batch `WHERE id IN (...)` queries and dict lookups.
+Three rounds of systematic performance audits across **all 16 backend files** (11 API routes + 5 background services) replaced per-item `session.get()` / `session.exec()` calls inside loops with batch `WHERE id IN (...)` queries, `project_players_batch`, and dict lookups.
 
-**Scope:** 29 distinct N+1 patterns identified and eliminated across three priority tiers:
+**Scope:** 29+ distinct N+1 patterns identified and eliminated across three priority tiers:
 
 | Tier | Files | Before (queries/request) | After | Reduction |
 |------|-------|--------------------------|-------|-----------|
@@ -304,10 +318,11 @@ Systematic performance audit across **all 16 backend files** (11 API routes + 5 
 **Biggest wins:**
 - **Live scoring pipeline** — dropped from ~3,000 queries every 2 minutes to ~3 via a shared `_build_player_to_teams_batched()` helper that pre-fetches all Players, Users, and FantasyTeams in 3 queries
 - **League standings** — replaced `N_teams × N_weeks × _derive_week_points()` loop (~300 queries) with a single `SUM(modified_points) GROUP BY user_id` aggregate + one live accrual query
+- **`project_players_batch`** — roster projections dropped from 2N queries (2 per player) to exactly 2 total: one batch query for all `PlayerGameLog` rows, one for all `PlayerSeasonStats`. Same function reused across bot waivers, bot trades, draft agent, lineup optimizer, and player search
 - **Bot FA ownership checks** — replaced per-player `_player_owned_in_league()` calls (~400–600/bot) with a pre-computed `_owned_player_ids_in_league()` set (2–3 queries total)
 - **`_derive_week_points()`** — the most-called function in the app; refactored from per-slot queries to batch-fetching all `UserPlayerGameScore`, `PlayerGameLog`, and `FantasyLiveAccrual` rows upfront with dict lookups
 
-**Design constraint:** Zero frontend changes, zero new dependencies, identical API response shapes. All 504 tests pass unchanged.
+**Design constraint:** Zero frontend changes, zero new dependencies, identical API response shapes. All 534 tests pass unchanged.
 
 **Estimated capacity impact:** ~10× more concurrent users per DB connection; live scoring no longer saturates the single-instance PostgreSQL during game windows.
 
@@ -394,7 +409,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 
 ## Testing
 
-**504** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops), and integration-style API flows against SQLite fixtures.
+**534** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -437,6 +452,7 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Career volume guards for tiers** | Hitters need 400+ career PA, starters 150+ career IP, relievers 50+ career IP to reach Star tier — prevents small-sample overconfidence from prospects with hot starts |
 | **Trade-waiver conflict resolution** | Chronological serving instead of blocking; overlapping proposals auto-cancel at resolution time when a player is no longer on the roster; supports 12+ open proposals for the same player without deadlocking |
 | **Dynamic week calculation** | Scoring weeks derived from `scoring_start_date` and `current_week` at runtime — no hardcoded calendar; `scoring_start_date` defaults to the day after draft so users don't miss games already underway; all weeks run Monday–Sunday with short first weeks for mid-week drafts |
+| **Effective gear display** | Every gear card renders the true diminished boost after stacking (not the raw template value); two-decimal precision matches the backend scoring math — fantasy players can verify exactly what each piece contributes |
 
 ---
 
