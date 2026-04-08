@@ -26,7 +26,8 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **5 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge) — **persisted per bot** with **16 tunable knobs** per archetype, used **all season**: draft bidding, waivers, trades, marketplace, lineup optimization, and gear equipping.
 - **Flexible league sizes** — commissioners can **fill empty slots with AI managers** in pre-season. Play with 3 friends and 7 bots, or any mix.
 - **Switch Mode** moves between Solo and League contexts with **independent rosters, gear, scores, and matchups**.
-- **Live scoring** with 60-second box score polling, in-game fantasy point accrual with **gear snapshot freezing**, push notifications for player events (HRs, steals, K milestones, gear proximity hints).
+- **Live scoring** with 60-second box score polling, in-game fantasy point accrual with **gear snapshot freezing**, and **live box scores** with real-time current-batter highlighting (MLB ID matching via linescore API).
+- **Event-driven notifications** — SSE-pushed instant alerts for every stat event (hits, walks, HRs, Ks, etc.) delivered faster than ESPN or Yahoo. Two-tier system (Highlights + Play-by-Play) with per-user granularity toggles. Web Push (VAPID) for OS-level notifications.
 - **Play-by-play enrichment** — fielding credits (OF catches, double plays), ABS challenge tracking, trailing/go-ahead HR detection, foul ball counting from Statcast.
 - **Unified transactions** for waivers and trades; bots participate in both with personality-driven decision making and season-phase-aware trade throttling.
 - **Research** with MLB schedules, rosters, and **Statcast analytics** (barrel%, xBA, xSLG, xwOBA, platoon splits, park factors) in player deep-dives.
@@ -118,7 +119,7 @@ Multi-layer security posture for a public-facing app with real users:
 | **Backend** | FastAPI, SQLModel, Pydantic v2, Uvicorn/Gunicorn |
 | **Database** | PostgreSQL 16 |
 | **ML** | scikit-learn (`HistGradientBoostingRegressor`, GMM), NumPy, pandas, joblib |
-| **Real-time** | SSE (`sse-starlette`) — draft room & live scores; Web Push (VAPID) for player event notifications |
+| **Real-time** | SSE (`sse-starlette`) — draft room, live scores, and **event-driven notifications**; Web Push (VAPID) for OS-level alerts |
 | **Data** | MLB Stats API (rosters, depth charts, game logs, play-by-play, transactions), Statcast (pybaseball) |
 | **Auth** | JWT + bcrypt, email verification + password reset (Resend) |
 | **Infra** | Multi-stage Docker image, **cloud VPS** + Cloudflare Tunnel |
@@ -208,7 +209,7 @@ Role-aware **absolute thresholds** on `projected_pts_per_game` with separate cut
 | Role | Criteria |
 |------|----------|
 | **STARTER** | ≥ 50% games started |
-| **CLOSER** | < 50% GS, ≥ 10 career saves |
+| **CLOSER** | < 50% GS, ≥ 5 career saves with ≥ 15% save rate |
 | **SETUP_MAN** | RP with ≥ 1.0 IP/appearance and high K rate (≥ 0.8 K/IP) |
 | **SWINGMAN** | RP with ≥ 1.5 IP/appearance (long relief / spot starts) |
 | **MIDDLE_RELIEVER** | Default RP classification |
@@ -266,9 +267,21 @@ In-memory **auction state machine** (nomination → bidding → timers) with **S
 
 **Stale accrual reconciliation** runs every tick — cleans up phantom rows from postponed/cancelled games, zeroes orphaned accruals from interrupted deploys.
 
-### Live push notifications
+**Live box scores** show real-time batting and pitching lines for every in-progress game. The **current batter is highlighted** dynamically by matching the MLB linescore API's batter ID against box score player IDs — updates automatically via SSE as each new batter steps up.
 
-Event detection runs inside the accrual loop: HRs (including multi-HR games), triples, multi-hit games (3/4/5+), stolen bases, RBI milestones (3+/5+), K milestones (8/10/12+), wins, saves, quality starts. **Gear proximity hints** tell users they're close to unlocking specific items ("1 more K for Nolan Ryan Rancher"). Rate-limited to 1 notification per user+player+game per 5 minutes.
+**Midnight ET boundary handling:** Games that extend past midnight (extras, rain delays, West Coast late starts) maintain correct roster locks, scoring attribution, and stat display by checking both today's and yesterday's schedule until 6 AM ET. Prevents premature unlocks and missing game cards.
+
+### Event-driven live notifications
+
+Two-tier notification system — **Live Highlights** and **Play-by-Play** — delivered via **SSE push** (not polling), with each tier independently toggleable per user in settings.
+
+**Architecture:** The backend scoring loop detects stat events as they happen within each 60-second MLB API tick. Events are broadcast instantly over the existing SSE connection (the same channel used for live scores) as `new_notification` events. The frontend `NotificationBell` listens for these events and updates the unread count in real-time — zero polling delay. **Web Push (VAPID)** fires in parallel for OS-level notifications even when the browser tab is closed.
+
+**Result:** Notifications arrive within seconds of the MLB API reporting the event — faster than ESPN or Yahoo, which batch-process on longer intervals with cooldown windows. No per-player cooldowns; every event fires individually.
+
+**Live Highlights:** HRs (including multi-HR games), triples, multi-hit games (3/4/5+), stolen bases, RBI milestones (3+/5+), K milestones (8/10/12+), wins, saves, quality starts. **Gear proximity hints** tell users they're close to unlocking specific items ("1 more K for Nolan Ryan Rancher").
+
+**Play-by-Play:** Every positive stat event — singles, doubles, walks, runs scored, individual RBIs, individual pitching strikeouts. Gives engaged users a real-time feed of their roster's performance without needing to watch every game.
 
 ### Waiver system
 
@@ -303,28 +316,18 @@ Clickable matchup history rows expand inline to show the full player-by-player s
 
 Every 15 minutes: poll MLB transactions API for injuries, DFA, trades, activations. Auto-updates player `injury_status` and pushes notifications to roster owners ("Justin Verlander placed on 15-day IL").
 
-### N+1 query elimination (full-app audit)
+### Performance engineering
 
-Three rounds of systematic performance audits across **all 16 backend files** (11 API routes + 5 background services) replaced per-item `session.get()` / `session.exec()` calls inside loops with batch `WHERE id IN (...)` queries, `project_players_batch`, and dict lookups.
+Full-app audit across **16 backend files** (11 API routes + 5 background services) eliminated **29+ N+1 query patterns** by replacing per-item `session.get()` calls inside loops with batch `WHERE id IN (...)` queries and dict lookups.
 
-**Scope:** 29+ distinct N+1 patterns identified and eliminated across three priority tiers:
+| Tier | Before (queries/request) | After | Reduction |
+|------|--------------------------|-------|-----------|
+| **User-facing pages** (roster, matchup, standings, trades, marketplace, etc.) | 60–500 per page load | 2–7 | **93–99%** |
+| **Background jobs** (live scoring, bot waivers, projections, etc.) | 3,000+ per cycle | 3–15 | **99%+** |
 
-| Tier | Files | Before (queries/request) | After | Reduction |
-|------|-------|--------------------------|-------|-----------|
-| **User-facing pages** (roster, matchup, standings, trades, marketplace, draft log, research, transactions, bulletin) | 8 | 60–500 per page load | 2–7 | **93–99%** |
-| **Background jobs** (live scoring, stat corrections, bot waivers, bot marketplace, lineup optimizer, matchup finalization, projections) | 6 | 3,000+ per cycle (runs every 2 min) | 3–15 | **99%+** |
-| **Rare paths** (CSV export, ring of honor, roster import, bot IL) | 4 | 30–260 | 2–5 | **90–98%** |
+Zero frontend changes, zero new dependencies, identical API response shapes. All tests pass unchanged.
 
-**Biggest wins:**
-- **Live scoring pipeline** — dropped from ~3,000 queries every 2 minutes to ~3 via a shared `_build_player_to_teams_batched()` helper that pre-fetches all Players, Users, and FantasyTeams in 3 queries
-- **League standings** — replaced `N_teams × N_weeks × _derive_week_points()` loop (~300 queries) with a single `SUM(modified_points) GROUP BY user_id` aggregate + one live accrual query
-- **`project_players_batch`** — roster projections dropped from 2N queries (2 per player) to exactly 2 total: one batch query for all `PlayerGameLog` rows, one for all `PlayerSeasonStats`. Same function reused across bot waivers, bot trades, draft agent, lineup optimizer, and player search
-- **Bot FA ownership checks** — replaced per-player `_player_owned_in_league()` calls (~400–600/bot) with a pre-computed `_owned_player_ids_in_league()` set (2–3 queries total)
-- **`_derive_week_points()`** — the most-called function in the app; refactored from per-slot queries to batch-fetching all `UserPlayerGameScore`, `PlayerGameLog`, and `FantasyLiveAccrual` rows upfront with dict lookups
-
-**Design constraint:** Zero frontend changes, zero new dependencies, identical API response shapes. All 534 tests pass unchanged.
-
-**Estimated capacity impact:** ~10× more concurrent users per DB connection; live scoring no longer saturates the single-instance PostgreSQL during game windows.
+**Additional optimizations:** Composite database indexes on hot query paths, PostgreSQL tuning (`shared_buffers`, `work_mem`, `effective_cache_size`), in-memory TTL caches for MLB API calls and derived scoring, and multi-worker Gunicorn configuration. Estimated **~10× capacity improvement** per DB connection.
 
 ### Client routing & mode switch
 
@@ -409,7 +412,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 
 ## Testing
 
-**534** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), and integration-style API flows against SQLite fixtures.
+**550+** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -431,7 +434,7 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 
 | Decision | Rationale |
 |----------|-----------|
-| **SSE vs WebSocket** | One-way push for scores/draft; mutations stay on REST |
+| **SSE vs WebSocket** | One-way push for scores, draft, and notifications; mutations stay on REST. Single SSE connection carries live scores, game updates, and instant notification events — no separate polling channels |
 | **In-memory draft** | Latency and timer accuracy; acceptable ephemeral state |
 | **Marcel-anchored ML (5 layers)** | Industry-standard Marcel baseline (Tango/Lichtman methodology) prevents early-season volatility; ML acts as a contextual nudge rather than sole predictor — same foundation ZiPS/Steamer use, with in-season game log blending, Statcast luck correction, and quantile ranges (p10/p50/p90) for confidence intervals |
 | **39 hitter / 28 pitcher features** | Five feature categories (box-score rolling, Statcast season, matchup context, rest/fatigue, pitch-level rolling) provide strong signal without overfitting; recency-weighted training adapts to recent form; model fingerprinting prevents silent degradation on feature list changes |
@@ -447,7 +450,8 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Season rarity ceiling + gear fatigue** | Prevents early-season Legendary/Mythic stockpiling and excessive drops from one hot player |
 | **Week-scaled shop pricing** | Price cap ramps with the season (400 → 600 → 1000 → 1500 → uncapped) so early shops are attainable; 1 aspirational "stretch" item per rotation |
 | **Startup secret enforcement** | App crashes if `DUGOUT_SECRET_KEY` is missing/default; Docker Compose uses `:?` required-variable syntax — no silent insecure deployments |
-| **Batch `IN` queries vs. ORM eager loading** | Explicit `WHERE id IN (...)` + dict lookups over SQLAlchemy relationship loading; keeps control of query count, avoids surprise joins, works with SQLModel's session pattern; 16-file audit eliminated 29 N+1 patterns (93–99% query reduction) |
+| **Batch `IN` queries vs. ORM eager loading** | Explicit `WHERE id IN (...)` + dict lookups over relationship loading; 16-file audit eliminated 29+ N+1 patterns (93–99% query reduction) with zero frontend changes |
+| **Event-driven notifications vs. polling** | In-app notification bell driven by SSE `new_notification` events (instant) with a 5-minute HTTP fallback — replaced 30-second polling. Play-by-play granularity would have been impractical with polling due to volume; SSE makes it free |
 | **Granular pitcher role classification** | 6-role `PitcherRole` enum (SP/CL/SU/MR/SW/UNK) from aggregated `PlayerSeasonStats` (GS/GP ratio, saves, IP/appearance, K rate); feeds gear equip restrictions so closers never get Wins+ gear and starters never get Saves+ gear |
 | **Career volume guards for tiers** | Hitters need 400+ career PA, starters 150+ career IP, relievers 50+ career IP to reach Star tier — prevents small-sample overconfidence from prospects with hot starts |
 | **Trade-waiver conflict resolution** | Chronological serving instead of blocking; overlapping proposals auto-cancel at resolution time when a player is no longer on the roster; supports 12+ open proposals for the same player without deadlocking |
