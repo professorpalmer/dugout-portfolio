@@ -1,6 +1,6 @@
 # Dugout — Fantasy Baseball RPG Platform
 
-> Full-stack fantasy baseball with RPG equipment, a player-driven coin economy, and in-house ML on real MLB data. **Live production** app behind Docker, PostgreSQL, and Cloudflare (Tunnel + edge TLS).
+> Full-stack fantasy baseball with RPG equipment, a player-driven coin economy, and in-house ML on real MLB data. **Live production** app behind Docker, PostgreSQL, Redis, and Cloudflare (Tunnel + edge TLS).
 
 **[Live app](https://dugoutfantasy.com)** · Private source · [Screenshots](SCREENSHOTS.md) · [Overview](#overview) · [Security](#security--production-hardening) · [Architecture](#architecture) · [ML pipeline](#ml-pipeline) · [System design](#system-design-highlights) · [Economy](#economy--balance-engineering) · [Ops](#operations) · [Testing](#testing)
 
@@ -103,12 +103,14 @@ Multi-layer security posture for a public-facing app with real users:
 │  │  └────┬─────┘  └───────────┘  └──────────┬───────────┘   │  │
 │  │       │  ┌──────────────────┐  ┌─────────▼──────────┐   │  │
 │  │       └─►│ SQLModel / PG    │  │ ML stack           │   │  │
-│  │          └──────────────────┘  │ GBR quantile,      │   │  │
-│  │                                │ GMM, draft agent,  │   │  │
-│  │                                │ lineup optimizer   │   │  │
-│  └────────────────────────────────┴──────────────────────┘   │
+│  │       │  └──────────────────┘  │ GBR quantile,      │   │  │
+│  │       │  ┌──────────────────┐  │ GMM, draft agent,  │   │  │
+│  │       └─►│ Redis (pub/sub   │  │ lineup optimizer   │   │  │
+│  │          │  + shared cache) │  └────────────────────┘   │  │
+│  │          └──────────────────┘                            │  │
+│  └──────────────────────────────────────────────────────────┘  │
 │  ┌─────────────────────────────────────────────────────────┐  │
-│  │  PostgreSQL 16 (volume)                                  │  │
+│  │  PostgreSQL 16 (volume)    Redis 7 (ephemeral)          │  │
 │  └─────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -118,6 +120,7 @@ Multi-layer security posture for a public-facing app with real users:
 | **Frontend** | React 19, TypeScript, Vite, Zustand |
 | **Backend** | FastAPI, SQLModel, Pydantic v2, Uvicorn/Gunicorn |
 | **Database** | PostgreSQL 16 |
+| **Cache/PubSub** | Redis 7 — cross-worker SSE broadcast (pub/sub), shared game cache, derived scoring TTL cache |
 | **ML** | scikit-learn (`HistGradientBoostingRegressor`, GMM), NumPy, pandas, joblib |
 | **Real-time** | SSE (`sse-starlette`) — draft room, live scores, and **event-driven notifications**; Web Push (VAPID) for OS-level alerts |
 | **Data** | MLB Stats API (rosters, depth charts, game logs, play-by-play, transactions), Statcast (pybaseball) |
@@ -338,6 +341,18 @@ Zero frontend changes, zero new dependencies, identical API response shapes. All
 
 **Additional optimizations:** Composite database indexes on hot query paths, PostgreSQL tuning (`shared_buffers`, `work_mem`, `effective_cache_size`), in-memory TTL caches for MLB API calls and derived scoring, and multi-worker Gunicorn configuration. Estimated **~10× capacity improvement** per DB connection.
 
+**Matchup page overhaul:** The heaviest user-facing page (matchup detail with full player-by-player scoring breakdown) originally fired 4 sequential HTTP requests totaling **55–70 DB queries** on initial load — and re-fired all of them every 30 seconds. Refactored into a **combined endpoint** (single request, ~30–34 queries) with a **lightweight scores-only polling endpoint** (~5 queries via batched derivation with 10s in-memory cache). Frontend uses **hash-based change detection**: polls return a content hash; if unchanged, the UI does nothing; if changed, it updates displayed scores immediately and refetches the full detail in the background. Result: **50–60% fewer queries on cold load, 90–95% fewer on poll cycles**, with zero visible latency to the user.
+
+### Cross-worker consistency (Redis)
+
+Multi-worker Gunicorn deployments introduce split-brain risk for in-memory state. Redis pub/sub solves this:
+
+- **SSE fan-out:** When Worker A scores a game, it publishes the event to Redis; Workers B–N receive it and push to their connected SSE clients. Every user sees the update regardless of which worker their connection hit.
+- **Shared game cache:** Live game state (schedule, scores, in-progress flags) is stored in Redis so all workers read from the same source of truth. The scheduler writes; API workers read — no stale-cache divergence.
+- **Draft room coordination:** Auction bids, nominations, and timer events are broadcast via Redis channels so multi-worker draft sessions stay synchronized.
+
+Graceful fallback: if Redis is unavailable, the app falls back to single-process in-memory state — solo development and single-worker deployments work without Redis configured.
+
 ### Client routing & mode switch
 
 Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch Mode** remounts pages and refetches cleanly without hard refresh.
@@ -441,7 +456,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 
 ## Testing
 
-**668+** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops, **gear-only scoring categories**, **56 pitcher mitigation/role gear trigger tests** — positive fires, negative edge cases, hardened Mythic/Legendary thresholds, streak triggers), **bot marketplace intelligence** (self-usefulness hold logic, stale listing repricing/salvage, single-bot integration), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), and integration-style API flows against SQLite fixtures.
+**669+** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops, **gear-only scoring categories**, **56 pitcher mitigation/role gear trigger tests** — positive fires, negative edge cases, hardened Mythic/Legendary thresholds, streak triggers), **bot marketplace intelligence** (self-usefulness hold logic, stale listing repricing/salvage, single-bot integration), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -451,11 +466,12 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 # Simplified compose topology
 services:
   db:       # PostgreSQL 16 + healthcheck
+  redis:    # Redis 7 — pub/sub + shared cache (ephemeral)
   app:      # Node build stage → Python runtime, API + static SPA
   tunnel:   # cloudflared (optional; or TLS-only reverse proxy)
 ```
 
-Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunicorn** fronts **Uvicorn** workers.
+Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunicorn** fronts **Uvicorn** workers (2 workers, Redis-coordinated).
 
 ---
 
@@ -492,6 +508,9 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Bot-to-bot transactions** | Bots propose trades to and buy from each other, not just humans; creates organic marketplace churn and fills the trade history page in solo mode |
 | **Smart bot gear listing** | Before listing rare+ gear, bots check if the item would upgrade one of their own starters (`_bot_could_still_use`); stale listings auto-repriced or salvaged after 48 hours |
 | **PostgreSQL advisory locks for seeding** | `pg_advisory_lock` prevents concurrent Gunicorn workers from creating duplicate `GearTemplate` rows during startup; idempotent dedup/pruning as a safety net |
+| **Combined matchup endpoint** | Merged 2 sequential API calls (summary → detail waterfall) into a single endpoint that resolves the matchup internally and returns both summary + full player-level detail; eliminates the round-trip dependency and halves cold-load queries |
+| **Hash-based smart polling** | Lightweight scores endpoint returns an MD5 content hash alongside point totals; frontend compares hashes and only refetches the full detail when scores actually change — 90–95% of poll cycles do zero heavy DB work |
+| **Redis pub/sub for multi-worker SSE** | Single Gunicorn worker scores a game → publishes to Redis → all workers push to their SSE clients; graceful fallback to in-memory for single-worker/dev deployments |
 
 ---
 
