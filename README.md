@@ -21,15 +21,15 @@
 Dugout layers **RPG progression** on head-to-head fantasy baseball:
 
 - **8 equipment slots** per player (hat, shades, chain, jersey, glove, bat, wristband, cleats) with **6 rarity tiers** (Common → Mythic).
-- **~200 gear items** with challenge-based unlock triggers, performance-gated rarity rolls, and soulbound loot; **marketplace** resales with tax sinks.
+- **~200 gear items** with challenge-based unlock triggers, performance-gated rarity rolls, and soulbound loot; **marketplace** resales with tax sinks. **Gear-created scoring categories** (holds, innings pitched, foul balls) turn traditionally worthless fantasy assets — setup men, middle relievers — into real point producers.
 - **Auction draft** with an **AI advisor panel** (real-time bid/let-go recommendations, natural-language reasoning) and **bot opponents** that bid with distinct personalities.
 - **5 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge) — **persisted per bot** with **16 tunable knobs** per archetype, used **all season**: draft bidding, waivers, trades, marketplace, lineup optimization, and gear equipping.
 - **Flexible league sizes** — commissioners can **fill empty slots with AI managers** in pre-season. Play with 3 friends and 7 bots, or any mix.
 - **Switch Mode** moves between Solo and League contexts with **independent rosters, gear, scores, and matchups**.
-- **Live scoring** with 60-second box score polling, in-game fantasy point accrual with **gear snapshot freezing**, and **live box scores** with real-time current-batter highlighting (MLB ID matching via linescore API).
+- **Live scoring** with 15-second box score polling, in-game fantasy point accrual with **gear snapshot freezing**, and **live box scores** with real-time current-batter highlighting (MLB ID matching via linescore API). **Merge-based frontend updates** — game state diffs are compared field-by-field so the UI only re-renders when data actually changes (no poll-cycle flicker). Yesterday's finals are auto-evicted from the live page once today's first pitch is thrown.
 - **Event-driven notifications** — SSE-pushed instant alerts for every stat event (hits, walks, HRs, Ks, etc.) delivered faster than ESPN or Yahoo. Two-tier system (Highlights + Play-by-Play) with per-user granularity toggles. Web Push (VAPID) for OS-level notifications.
 - **Play-by-play enrichment** — fielding credits (OF catches, double plays), ABS challenge tracking, trailing/go-ahead HR detection, foul ball counting from Statcast.
-- **Unified transactions** for waivers and trades; bots participate in both with personality-driven decision making and season-phase-aware trade throttling.
+- **Unified transactions** for waivers and trades; bots participate in both — including **bot-to-bot trades** — with personality-driven decision making and season-phase-aware trade throttling.
 - **Research** with MLB schedules, rosters, and **Statcast analytics** (barrel%, xBA, xSLG, xwOBA, platoon splits, park factors) in player deep-dives.
 - **Marcel-anchored ML projections** (p10/p50/p90 ranges) with a 5-layer architecture: Marcel multi-year baseline → in-season blend → Statcast luck correction → gradient-boosted context adjustment (**39 hitter / 28 pitcher features**) → range construction. Recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits.
 - **Gear catalogue** tracks collection progress across all ~200 items with challenge conditions and rarity-grouped browsing.
@@ -261,7 +261,7 @@ In-memory **auction state machine** (nomination → bidding → timers) with **S
 
 ### Live scoring pipeline
 
-60-second **MLB Stats API polling** → detect in-progress games → fetch box scores → compute fantasy points with **gear modifier engine** (caps, diminishing "all" stacks, penalties after cap) → update `FantasyLiveAccrual` rows with delta tracking → **SSE broadcast** to connected clients.
+15-second **MLB Stats API polling** → detect in-progress games → fetch box scores → compute fantasy points with **gear modifier engine** (caps, diminishing "all" stacks, penalties after cap) → update `FantasyLiveAccrual` rows with delta tracking → **SSE broadcast** to connected clients.
 
 **Gear snapshots** are frozen at first accrual so mid-game equipment swaps don't retroactively change scoring. When games go final: reverse all live accruals → apply authoritative final scoring with **Statcast enrichment** (foul balls, barrel data, pitch speeds) → **play-by-play parsing** (fielding credits, ABS challenges, trailing HR detection) → loot rolls → coin grants → persist `PlayerGameLog` for ML retraining.
 
@@ -275,7 +275,7 @@ In-memory **auction state machine** (nomination → bidding → timers) with **S
 
 Two-tier notification system — **Live Highlights** and **Play-by-Play** — delivered via **SSE push** (not polling), with each tier independently toggleable per user in settings.
 
-**Architecture:** The backend scoring loop detects stat events as they happen within each 60-second MLB API tick. Events are broadcast instantly over the existing SSE connection (the same channel used for live scores) as `new_notification` events. The frontend `NotificationBell` listens for these events and updates the unread count in real-time — zero polling delay. **Web Push (VAPID)** fires in parallel for OS-level notifications even when the browser tab is closed.
+**Architecture:** The backend scoring loop detects stat events as they happen within each 15-second MLB API tick. Events are broadcast instantly over the existing SSE connection (the same channel used for live scores) as `new_notification` events. The frontend `NotificationBell` listens for these events and updates the unread count in real-time — zero polling delay. **Web Push (VAPID)** fires in parallel for OS-level notifications even when the browser tab is closed.
 
 **Result:** Notifications arrive within seconds of the MLB API reporting the event — faster than ESPN or Yahoo, which batch-process on longer intervals with cooldown windows. No per-player cooldowns; every event fires individually.
 
@@ -291,7 +291,16 @@ Daily processing at **8 AM ET**. Dropped players sit on waivers for **2 days** b
 
 ### Bot trade engine
 
-**League-wide rolling 7-day cap** scales with the season: 1 proposal/week early (>10 weeks to playoffs) → 2 mid-season → 3 near playoffs (≤4 weeks). Per-bot attempt chances are low (6–14%) so proposals trickle in organically. Trade matching finds same-position-bucket players within the personality's max projection gap; 60/40 bias toward best trade vs. random. Incoming trade acceptance uses personality-specific `accept_min_ratio` and `accept_min_surplus` thresholds with injury discount. Late Surge bots ramp via a multiplier (1.0× → 1.6×) as playoffs approach.
+**League-wide rolling 7-day cap** scales with the season: 2 proposals/week early (>10 weeks to playoffs) → 3 mid-season → 5 near playoffs (≤4 weeks). Per-bot attempt chances are low (6–14%) so proposals trickle in organically. **Bots trade with any league member** — humans and other bots alike — so the marketplace feels active even in solo mode. Trade matching finds same-position-bucket players within the personality's max projection gap; 60/40 bias toward best trade vs. random. Incoming trade acceptance uses personality-specific `accept_min_ratio` and `accept_min_surplus` thresholds with injury discount. Late Surge bots ramp via a multiplier (1.0× → 1.6×) as playoffs approach.
+
+### Bot marketplace intelligence
+
+Bots don't just randomly list and buy gear — they make personality-driven decisions that mimic engaged human players:
+
+- **Smart listing:** Before listing rare+ gear, bots check if the item would be an upgrade for one of their own starters. If it would, they hold it — even if they could profit from the sale.
+- **Stale listing management:** Unsold listings older than 48 hours are automatically repriced (25% discount) or salvaged for coins (40% chance), keeping the marketplace fresh.
+- **Staggered per-bot timing:** Each 90-minute economy cycle schedules individual bot actions with random 0–30 minute jitter via `threading.Timer`, so marketplace activity is scattered throughout the day instead of all bots acting simultaneously.
+- **Bot-to-bot transactions:** Bots buy from and trade with each other — not just humans — creating organic marketplace churn that mirrors a real multi-player league.
 
 ### Trade-waiver conflict guards
 
@@ -353,7 +362,7 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 
 **Role-based loot filtering:** Loot drop pools are filtered by `PitcherRole` — a closer never rolls Wins+ or Quality Start gear, a starter never rolls Saves+ gear. Position-aware restrictions also prevent hitting-stat gear (HR+, SB+) from dropping for pure pitchers and pitching-stat gear from dropping for pure hitters. Two-way players are eligible for both pools. The same restrictions apply at the equip endpoint and for bot gear assignment.
 
-**Streak triggers** span multiple games: 10+ hit streak, 7/15/20 consecutive starts, 5+ consecutive SB without CS, 3+ weekly saves, 5-game HR streak, 3+ consecutive matchup wins.
+**Streak triggers** span multiple games: 20+ hit streak (Mythic), 6-game HR streak (Mythic), 50+ consecutive starts (Mythic), 30+ consecutive starts (Legendary), 5 consecutive quality starts with ≤1 ER (Legendary), 5+ consecutive SB without CS, 3+ weekly saves, 3+ consecutive matchup wins. Challenge difficulty is calibrated to rarity tier — Mythic triggers are statistically near-impossible, while Uncommon triggers fire on solid but achievable performances.
 
 **Mythic items** (0.5% base weight): Babe Ruth's Called Shot Bat (490+ ft HR), Billy Hamilton's 1890 Cleats (4+ SB), Jeter's Flip Glove (SS, 5+ assists in a win), Gibson's 1968 Visor (8+ IP, 0 ER, 10+ K), and more. **Event-awarded gear** can be admin-granted for historic real-world moments (soulbound, non-tradeable).
 
@@ -366,7 +375,27 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 - **Diminishing daily drops:** 1st drop today = 100%, 2nd = 50%, 3rd = 25%, 4th+ = 10%
 - **Daily-use gear lock:** prevents swapping gear between players on the same calendar day
 - **Soulbound loot** from performance; marketplace-only circulation for purchased gear; inverse tier drop bias for bench players
-- **Foul ball scoring** exists only via gear — base weight is 0.0, but specific equipment activates the category (bridges Statcast enrichment and gear value)
+- **Gear-only scoring categories** (foul balls, holds, innings pitched) — base weight is 0.0 but specific equipment activates the category, creating unique value for gear without inflating baseline scoring. Includes **mitigation gear** that absorbs a percentage of negative stat penalties (e.g., ER, losses)
+
+### Solving the middle reliever problem
+
+Traditional fantasy baseball has a structural blind spot: **setup men and middle relievers are nearly worthless**. They don't earn wins, saves, or enough innings to move the needle — so the 7th-inning guy who strands the bases loaded (the reason your closer even gets a save opportunity) generates zero fantasy value. Every major platform (ESPN, Yahoo, Fantrax) ignores holds entirely or treats them as a niche roto category.
+
+Dugout solves this through **gear-created scoring categories**. Holds have a base weight of 0.0 — they never appear in matchup totals by default. But specific equipment *activates* the category:
+
+| Gear | Rarity | Effect |
+|------|--------|--------|
+| Setup Man's Wristband | Uncommon | +4.5 pts per hold |
+| Reliever's Rally Cap | Rare | +4.5 pts per hold (requires 2+ K, 0 BB) |
+| High Leverage Band | Epic | +4.5 pts per hold (requires 3+ K) |
+
+With the right gear equipped, a reliever earning holds suddenly generates real fantasy points — points that only exist because the gear creates them. The same pattern applies to **innings pitched** (rewarding workhorses who go deep) and **foul balls** (rewarding at-bat quality tracked via Statcast).
+
+**24 pitcher-specific gear triggers** cover the full bullpen spectrum: mitigation gear that absorbs ER penalties for rough outings, closer-specific items for clean saves, starter-only gear for marathon starts, and relief-specific triggers based on IP, K rate, and holds. Each trigger has a challenge condition calibrated to its rarity tier — Uncommon triggers fire on solid performances, while Legendary requires a Maddux (CG, <100 pitches, 0 ER).
+
+**Mitigation gear** adds a second dimension: instead of boosting positive stats, pieces like the Pitching Bible (Legendary) absorb 22% of earned run penalties. A pitcher who gives up 5 ER (normally −12.5 pts) only loses −9.75 pts with mitigation equipped. This creates meaningful gear decisions for pitchers who produce high-K, high-ER lines — the fantasy equivalent of a "bend but don't break" reliever.
+
+**Why this matters architecturally:** The gear-only scoring system required zero changes to the base scoring engine — commissioner-configured weights remain untouched. The `GameLine` dataclass carries holds/IP/fouls through the full pipeline (MLB API → live scoring → gear triggers → point calculation), and the `StatModifierType` enum gates which categories gear can activate. Holds are persisted in `PlayerGameLog` for historical queries and stat correction reconciliation.
 
 ---
 
@@ -398,13 +427,13 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 
 | Job | Frequency | Purpose |
 |-----|-----------|---------|
-| MLB poll | 60 seconds | Schedule, live accrual, final scoring, SSE broadcasts |
+| MLB poll | 15 seconds | Schedule, live accrual, final scoring, SSE broadcasts |
 | Stat corrections | Daily 8 AM ET | Re-fetch yesterday's box scores for MLB corrections |
 | Roster sync | Daily 5 AM ET | Refresh player teams/names, Statcast cache, reclassify tiers + pitcher roles, retrain ML models |
 | Weekly advance | Monday 6 AM ET | Finalize week (with point reconciliation), generate new matchups, advance playoffs. `scoring_start_date` defaults to the day after draft; all weeks run Monday–Sunday with dynamic calculation from `scoring_start_date + (current_week - 1) × 7 days` |
 | Bot management | Daily 10 AM ET | Auto-lineup, gear management, bot waivers + trades |
 | Waiver processing | Daily 8 AM ET | Per-league waiver claims + post-waiver bot lineup optimize |
-| Bot economy | 3× daily | Trade inbox resolution + marketplace buy/sell |
+| Bot economy | Every 90 min (staggered per-bot) | Trade proposals, inbox resolution, marketplace buy/sell; each bot fires with random 0–30 min jitter |
 | Game reminders | Every 15 min | Smart daily alert when roster players' games are about to start; deduped to one per user per day |
 | MLB transactions | Every 15 min | Injury/DFA/trade updates, pushes to roster owners |
 
@@ -412,7 +441,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 
 ## Testing
 
-**550+** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), and integration-style API flows against SQLite fixtures.
+**650+** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops, **gear-only scoring categories**, **56 pitcher mitigation/role gear trigger tests** — positive fires, negative edge cases, hardened Mythic/Legendary thresholds, streak triggers), **bot marketplace intelligence** (self-usefulness hold logic, stale listing repricing/salvage, single-bot integration), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -445,8 +474,8 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Bot personality archetypes** | 5 deterministic profiles (16 knobs each) vs. random behavior; makes AI opponents feel distinct all season |
 | **Flexible league sizes** | Commissioner-driven bot fill vs. forced 10-player roster; lowers barrier to starting a league |
 | **Gear snapshot at game start** | Prevents mid-game equipment swaps from retroactively changing live accrual; frozen state replayed on final scoring |
-| **Rolling weekly trade cap** | Season-phase-aware throttle (1→2→3/week) vs. flat cooldown; bots feel more desperate near playoffs without flooding early |
-| **Foul balls as gear-only scoring** | Base weight = 0.0 but gear activates the category; bridges Statcast enrichment and equipment value without inflating base scoring |
+| **Rolling weekly trade cap** | Season-phase-aware throttle (2→3→5/week) vs. flat cooldown; bots feel more desperate near playoffs without flooding early |
+| **Gear-created scoring categories** | Holds, innings pitched, and foul balls have base weight = 0.0 — invisible by default. Specific gear activates them, turning traditionally worthless fantasy assets (setup men, middle relievers) into point producers. Solves the industry-wide middle reliever problem without inflating baseline scoring or requiring commissioner config. Mitigation gear absorbs negative stat penalties (e.g., −22% ER) for a second gear dimension |
 | **Season rarity ceiling + gear fatigue** | Prevents early-season Legendary/Mythic stockpiling and excessive drops from one hot player |
 | **Week-scaled shop pricing** | Price cap ramps with the season (400 → 600 → 1000 → 1500 → uncapped) so early shops are attainable; 1 aspirational "stretch" item per rotation |
 | **Startup secret enforcement** | App crashes if `DUGOUT_SECRET_KEY` is missing/default; Docker Compose uses `:?` required-variable syntax — no silent insecure deployments |
@@ -457,6 +486,12 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Trade-waiver conflict resolution** | Chronological serving instead of blocking; overlapping proposals auto-cancel at resolution time when a player is no longer on the roster; supports 12+ open proposals for the same player without deadlocking |
 | **Dynamic week calculation** | Scoring weeks derived from `scoring_start_date` and `current_week` at runtime — no hardcoded calendar; `scoring_start_date` defaults to the day after draft so users don't miss games already underway; all weeks run Monday–Sunday with short first weeks for mid-week drafts |
 | **Effective gear display** | Every gear card renders the true diminished boost after stacking (not the raw template value); two-decimal precision matches the backend scoring math — fantasy players can verify exactly what each piece contributes |
+| **15-second polling (from 60s)** | Enabled by the N+1 audit (93–99% query reduction); 4× faster live scoring and notifications with negligible DB load increase on T3 Medium with burst credits |
+| **Merge-based live page updates** | Frontend compares incoming game data field-by-field against current state; only changed fields trigger re-renders — eliminates poll-cycle flicker without sacrificing update frequency |
+| **Staggered bot economy** | Per-bot `threading.Timer` with random 0–30 min jitter within each 90-min cycle; prevents all bots from listing/buying/trading simultaneously — marketplace activity is scattered like a real league |
+| **Bot-to-bot transactions** | Bots propose trades to and buy from each other, not just humans; creates organic marketplace churn and fills the trade history page in solo mode |
+| **Smart bot gear listing** | Before listing rare+ gear, bots check if the item would upgrade one of their own starters (`_bot_could_still_use`); stale listings auto-repriced or salvaged after 48 hours |
+| **PostgreSQL advisory locks for seeding** | `pg_advisory_lock` prevents concurrent Gunicorn workers from creating duplicate `GearTemplate` rows during startup; idempotent dedup/pruning as a safety net |
 
 ---
 
