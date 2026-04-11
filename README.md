@@ -26,7 +26,7 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 
 - **8 equipment slots** per player (hat, shades, chain, jersey, glove, bat, wristband, cleats) with **6 rarity tiers** (Common → Mythic).
 - **~200 gear items** with challenge-based unlock triggers, performance-gated rarity rolls, and soulbound loot; **marketplace** resales with tax sinks. **Gear-created scoring categories** (holds, innings pitched, foul balls) turn traditionally worthless fantasy assets — setup men, middle relievers — into real point producers.
-- **Auction draft** with an **AI advisor panel** (real-time bid/let-go recommendations, natural-language reasoning) and **bot opponents** that bid with distinct personalities. **Injury-aware auction values** — IL-eligible players receive 50% reduced opening bids.
+- **Auction draft** with an **AI advisor panel** (real-time bid/let-go recommendations, natural-language reasoning) and **bot opponents** that bid with distinct personalities. **Injury-aware auction values** — IL-eligible players receive 50% reduced opening bids. **Ready-up lobby** — pre-draft waiting room with tutorial cards, per-member readiness tracking (bots auto-ready), and commissioner force-start; prevents users from missing early picks.
 - **6 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge, Gear Grinder) — **persisted per bot** with **20 tunable knobs** per archetype, used **all season**: draft bidding, waivers, trades, marketplace, lineup optimization, gear equipping, **pitcher streaming**, and **shop buying**.
 - **Flexible league sizes** — commissioners can **fill empty slots with AI managers** in pre-season. Play with 3 friends and 7 bots, or any mix.
 - **Switch Mode** moves between Solo and League contexts with **independent rosters, gear, scores, and matchups**.
@@ -34,7 +34,7 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **Event-driven notifications** — SSE-pushed instant alerts for every stat event (hits, walks, HRs, Ks, etc.) delivered faster than ESPN or Yahoo. Two-tier system (Highlights + Play-by-Play) with per-user granularity toggles. Web Push (VAPID) for OS-level notifications.
 - **Play-by-play enrichment** — fielding credits (OF catches, double plays), ABS challenge tracking, trailing/go-ahead HR detection, foul ball counting from Statcast.
 - **Unified transactions** for waivers and trades; bots participate in both — including **bot-to-bot trades** — with personality-driven decision making and season-phase-aware trade throttling.
-- **Research Hub** — a multi-tab player intelligence center (Search, Leaderboard, Free Agents, Compare) with Redis-cached rankings, position filtering, waiver hold badges, and side-by-side player comparison. **Team profiles** show any team's full roster, trophy case, and gear loadout.
+- **Research Hub** — a multi-tab player intelligence center (Search, Leaderboard, Free Agents, Compare) with Redis-cached rankings, position filtering, **pitcher designation sub-filters** (SP/CL/SU/MR/SW), waiver hold badges, and side-by-side player comparison. **Team profiles** show any team's full roster, trophy case, and gear loadout.
 - **Marcel-anchored ML projections** (p10/p50/p90 ranges) with a 5-layer architecture: Marcel multi-year baseline → in-season blend → Statcast luck correction → gradient-boosted context adjustment (**39 hitter / 28 pitcher features**) → range construction. Recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits. Dedicated **Projections page** with animated pipeline progress, per-player confidence bars, matchup context, and Statcast chips.
 - **Injury List management** — 2 IL slots that don't count against the active roster cap; **injury-aware bots** that auto-manage IL, discount injured players in trades and draft, and stash IL-eligible stars based on personality; **ESPN Day-to-Day scraper** as a supplemental injury data source.
 - **Gear catalogue** tracks collection progress across all ~200 items with challenge conditions and rarity-grouped browsing.
@@ -270,8 +270,8 @@ Product messaging: **in-house statistical ML**, not generative AI.
 Multi-tab player intelligence center — the primary discovery surface for all roster decisions:
 
 - **Search:** Debounced player search (300ms) with Browse by Team grid (all 30 MLB teams). Player deep-dives show MLB Stats API season stats, last 10 game logs, Dugout fantasy context (tier, pitcher role, projection, ownership, equipped gear count), today's matchup, and **Statcast chips** (xBA, barrel%, hard-hit%, etc.).
-- **Leaderboard:** Ranked by actual accrued fantasy points from `PlayerGameLog` aggregates (not projections). Sortable by Season Pts / Pts/Game / Projected, filterable by position (All, C, 1B, 2B, 3B, SS, OF, DH, P), paginated (25/page with Load More). Per-league ownership badges. **Redis-cached** with 5-minute background refresh via APScheduler — reads are near-instant.
-- **Free Agents:** Same filterable/sortable/paginated view as leaderboard, filtered to unowned players. **Waiver hold badges** show the exact date a recently-dropped player becomes available — no guesswork.
+- **Leaderboard:** Ranked by actual accrued fantasy points from `PlayerGameLog` aggregates (not projections). Sortable by Season Pts / Pts/Game / Projected, filterable by position (All, C, 1B, 2B, 3B, SS, OF, DH, P), paginated (25/page with Load More). Per-league ownership badges. **Redis-cached** with 5-minute background refresh via APScheduler — reads are near-instant. **Pitcher designation sub-filter:** when position = P, a secondary pill bar appears for Starter / Closer / Setup Man / Middle Reliever / Swingman — backed by the same `PitcherRole` classification used for gear restrictions.
+- **Free Agents:** Same filterable/sortable/paginated view as leaderboard, filtered to unowned players. Same pitcher designation sub-filter. **Waiver hold badges** show the exact date a recently-dropped player becomes available — no guesswork.
 - **Compare:** Side-by-side comparison of up to 3 players with season stats, fantasy point estimates, ML projections, tier badges, and ownership.
 
 **Season Points Estimator:** Per-player endpoint applies the league's scoring weights to MLB season stats, producing a category-by-category breakdown with totals and per-game averages. Custom scoring leagues get correctly weighted estimates.
@@ -289,6 +289,8 @@ Multi-tab player intelligence center — the primary discovery surface for all r
 **Per-user auto-nominate:** Each drafter independently toggles whether AI nominates on their turn — not a league-wide switch. When enabled, the server-side `_schedule_next_nomination` checks the current nominator's `DraftMember.auto_nominate` flag and dispatches AI nomination only for that member. Toggling mid-draft immediately triggers or cancels AI nomination if it's your turn, with real-time SSE broadcast of the per-user state change to all clients.
 
 **Pitcher pacing:** enforces filling 9 pitching lineup slots (Yahoo-style) so teams don't end draft-heavy on hitters. Bots always auto-nominate on their turn regardless of human settings — so drafts don't stall.
+
+**Ready-up lobby:** Before the auction clock starts, the draft room opens a **lobby phase** where all participants see 5 tutorial cards explaining draft mechanics, and each member must explicitly mark themselves "ready." Bots auto-ready on room creation; the commissioner can force-start at any time. The lobby state (`lobby: bool`, `ready_members: set[int]`) is part of the Redis-backed `DraftRoom` — serialized, locked, and broadcast via the same distributed infrastructure as bids. Two dedicated endpoints (`POST /draft/ready`, `POST /draft/begin`) manage the transition; `member_ready` SSE events update all clients in real time. Push notifications ("Draft Lobby Open! Tap to join.") link directly to the lobby screen so users never bypass the tutorial or miss early picks. **Non-blocking won-toast:** When a player is won, a slide-in toast appears at the top of the draft UI instead of a full-screen overlay — users can continue watching the draft without interruption, especially critical on mobile.
 
 **Injury-aware draft:** IL-eligible players receive 50% reduced opening bids and auction valuations, with injury status displayed in the draft room and advisor reasoning.
 
@@ -401,6 +403,8 @@ Zero frontend changes, zero new dependencies, identical API response shapes. All
 **Bot roster fill player cache:** Bot roster fill operations (`fill_bot_rosters_for_league`) previously ran `select(Player)` on every iteration of the fill loop. Refactored to load the full player table once and pass it as `_player_cache` through the call chain — eliminates redundant full-table scans during draft and waiver processing.
 
 **Matchup page overhaul:** The heaviest user-facing page (matchup detail with full player-by-player scoring breakdown) originally fired 4 sequential HTTP requests totaling **55–70 DB queries** on initial load — and re-fired all of them every 30 seconds. Refactored into a **combined endpoint** (single request, ~30–34 queries) with a **lightweight scores-only polling endpoint** (~5 queries via batched derivation with 10s in-memory cache). Frontend uses **hash-based change detection**: polls return a content hash; if unchanged, the UI does nothing; if changed, it updates displayed scores immediately and refetches the full detail in the background. Result: **50–60% fewer queries on cold load, 90–95% fewer on poll cycles**, with zero visible latency to the user.
+
+**Redis connection singleton:** Draft room operations (bids, nominations, state loads) originally created a new Redis connection per call — adding 25–75ms TCP handshake overhead to every bid. Replaced with a module-level singleton (`_redis_client`) initialized once on first use and reused across all requests. Eliminated the per-bid latency penalty entirely; bids now register in under 5ms on the Redis path.
 
 **Research Hub caching:** The leaderboard and free agents endpoints aggregate `PlayerGameLog.raw_fantasy_points` across all current-season games — expensive when run per-request for 700+ MLB players. A **Redis-backed pre-computation cache** rebuilds every 5 minutes via an APScheduler background job. Endpoint reads are near-instant (Redis GET + JSON deserialize); on cache miss, a synchronous fallback queries the DB directly. Free agents share the same cache and filter out owned players per-league.
 
@@ -531,7 +535,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 
 ## Testing
 
-**787+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
+**802+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
@@ -547,7 +551,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 | **Research Hub** | 15+ | Leaderboard aggregation, season filtering, position filters, pagination, ownership, free agent exclusion |
 | **Live scoring** | 30+ | Accrual reconciliation, midnight boundary handling, stat corrections, Statcast enrichment |
 | **Security & hardening** | 20+ | Health endpoint info leakage, error message sanitization, per-user auto-nominate toggle (member-only access, non-member rejection), API response shape validation |
-| **Draft room Redis** | 33 | Serialization round-trips (`from_dict`/`to_redis_dict`) for all draft dataclasses, Redis save/load with mock client, `_fresh_room` fallback hierarchy, distributed lock acquire/release/non-blocking, `get_room` Redis fallback on local cache miss, `create_room`/`destroy_room` Redis lifecycle, mutation save propagation through bid route |
+| **Draft room Redis** | 48 | Serialization round-trips (`from_dict`/`to_redis_dict`) for all draft dataclasses, Redis save/load with mock client, `_fresh_room` fallback hierarchy, distributed lock acquire/release/non-blocking, `get_room` Redis fallback on local cache miss, `create_room`/`destroy_room` Redis lifecycle, mutation save propagation through bid route, **lobby feature** (lobby/ready_members serialization round-trips, backwards-compat for pre-lobby rooms, create_room auto-readies bots, `POST /draft/ready` marks user + rejects after lobby ends, `POST /draft/begin` transitions to active + commissioner-only + force-start, `start_draft` no longer fires nomination) |
 | **Other** | 50+ | Auth, balance, matchup scheduling, lineup optimizer, batch projections, waiver hold visibility, transaction export, season point estimator (hitter/pitcher/TWP), integration-style API flows |
 
 ---
@@ -617,6 +621,10 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Vectorized Statcast ingestion** | Replaced `iterrows()` loops with vectorized `set_index` → `rename` → `to_dict("index")` across all 4 Statcast pipelines. `iterrows()` is notoriously slow on pandas DataFrames; vectorized path processes 700+ player rows with negligible overhead |
 | **Batch week-points derivation** | Week finalization replaced per-user point derivation (N×5 queries) with a single batch function (~5 queries total) that partitions results in-memory. Cache-aware with per-user fallback — same semantics, fraction of the DB load |
 | **Structured logging everywhere** | Replaced all `print()` debugging with Python `logging` module across email, push notifications, and trade resolution. Consistent log levels (debug/info/warning/error), structured format strings, and proper exception logging via `logger.exception()` |
+| **Draft ready-up lobby** | Pre-draft lobby phase with tutorial cards and per-member readiness tracking. Lobby state (`lobby`, `ready_members`) is part of the Redis-backed `DraftRoom` — serialized, distributed-locked, and SSE-broadcast like any other draft mutation. Bots auto-ready; commissioner can force-start. Push notifications route users to the lobby, not past it. Prevents new users from missing early picks while ensuring everyone reads the rules |
+| **Non-blocking draft won-toast** | Replaced a full-screen "Player won" overlay (blocked the entire draft UI for 1–2s) with a slide-in toast that appears at the top edge and auto-dismisses. Users can continue watching bids, especially on mobile where screen real estate is scarce |
+| **Pitcher designation sub-filter** | Research Hub Leaderboard and Free Agents views surface a secondary pill bar when position = P, filtering by `PitcherRole` (SP/CL/SU/MR/SW). Backend passes `pitcher_role` through to the Redis-cached leaderboard query; frontend conditionally renders the sub-filter row. Reuses the same classification already powering gear restrictions |
+| **Redis connection singleton** | Draft room Redis calls originally created a fresh `redis.from_url()` connection per invocation (25–75ms TCP overhead per bid). Replaced with a module-level `_redis_client` singleton initialized once on first use. Near-zero per-request overhead; bid-to-register latency dropped from ~50ms to <5ms on the Redis path |
 
 ---
 
