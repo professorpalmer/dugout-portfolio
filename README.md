@@ -12,7 +12,7 @@
 |---------|-------------|-----------|------|
 | ![My Team](screenshots/my-team.png) | ![Matchup](screenshots/matchup-breakdown.png) | ![Equipment](screenshots/equipment.png) | ![Shop](screenshots/shop-detail.png) |
 
-**[View all 24 screenshots →](SCREENSHOTS.md)** — landing, live scores, box scores, matchups, scoring breakdowns, league standings, gear locker, shop, catalogue, waivers, trades, projections, lineup optimizer, research, player deep-dive, notifications, and more.
+**[View all 24 screenshots →](SCREENSHOTS.md)** — landing, live scores, box scores, matchups, scoring breakdowns, league standings, gear locker, shop, catalogue, waivers, trades, projections, lineup optimizer, research hub, player deep-dive, team profiles, notifications, and more.
 
 ---
 
@@ -22,7 +22,7 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 
 - **8 equipment slots** per player (hat, shades, chain, jersey, glove, bat, wristband, cleats) with **6 rarity tiers** (Common → Mythic).
 - **~200 gear items** with challenge-based unlock triggers, performance-gated rarity rolls, and soulbound loot; **marketplace** resales with tax sinks. **Gear-created scoring categories** (holds, innings pitched, foul balls) turn traditionally worthless fantasy assets — setup men, middle relievers — into real point producers.
-- **Auction draft** with an **AI advisor panel** (real-time bid/let-go recommendations, natural-language reasoning) and **bot opponents** that bid with distinct personalities.
+- **Auction draft** with an **AI advisor panel** (real-time bid/let-go recommendations, natural-language reasoning) and **bot opponents** that bid with distinct personalities. **Injury-aware auction values** — IL-eligible players receive 50% reduced opening bids.
 - **5 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge) — **persisted per bot** with **16 tunable knobs** per archetype, used **all season**: draft bidding, waivers, trades, marketplace, lineup optimization, and gear equipping.
 - **Flexible league sizes** — commissioners can **fill empty slots with AI managers** in pre-season. Play with 3 friends and 7 bots, or any mix.
 - **Switch Mode** moves between Solo and League contexts with **independent rosters, gear, scores, and matchups**.
@@ -30,11 +30,14 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **Event-driven notifications** — SSE-pushed instant alerts for every stat event (hits, walks, HRs, Ks, etc.) delivered faster than ESPN or Yahoo. Two-tier system (Highlights + Play-by-Play) with per-user granularity toggles. Web Push (VAPID) for OS-level notifications.
 - **Play-by-play enrichment** — fielding credits (OF catches, double plays), ABS challenge tracking, trailing/go-ahead HR detection, foul ball counting from Statcast.
 - **Unified transactions** for waivers and trades; bots participate in both — including **bot-to-bot trades** — with personality-driven decision making and season-phase-aware trade throttling.
-- **Research** with MLB schedules, rosters, and **Statcast analytics** (barrel%, xBA, xSLG, xwOBA, platoon splits, park factors) in player deep-dives.
-- **Marcel-anchored ML projections** (p10/p50/p90 ranges) with a 5-layer architecture: Marcel multi-year baseline → in-season blend → Statcast luck correction → gradient-boosted context adjustment (**39 hitter / 28 pitcher features**) → range construction. Recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits.
+- **Research Hub** — a multi-tab player intelligence center (Search, Leaderboard, Free Agents, Compare) with Redis-cached rankings, position filtering, waiver hold badges, and side-by-side player comparison. **Team profiles** show any team's full roster, trophy case, and gear loadout.
+- **Marcel-anchored ML projections** (p10/p50/p90 ranges) with a 5-layer architecture: Marcel multi-year baseline → in-season blend → Statcast luck correction → gradient-boosted context adjustment (**39 hitter / 28 pitcher features**) → range construction. Recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits. Dedicated **Projections page** with animated pipeline progress, per-player confidence bars, matchup context, and Statcast chips.
+- **Injury List management** — 2 IL slots that don't count against the active roster cap; **injury-aware bots** that auto-manage IL, discount injured players in trades and draft, and stash IL-eligible stars based on personality; **ESPN Day-to-Day scraper** as a supplemental injury data source.
 - **Gear catalogue** tracks collection progress across all ~200 items with challenge conditions and rarity-grouped browsing.
 - **Precision gear display** — every gear card shows the true effective boost after diminishing returns, not raw template values. Two-decimal precision across all surfaces (trophy case, locker, shop, catalogue, detail modals).
 - **Slot occupancy indicators** in the Move Position menu — open slots highlighted green, occupied slots dimmed with the current player's name — so lineup decisions never require scrolling.
+- **Transaction export** — downloadable Excel (.xlsx) of all league transactions with league isolation and batch queries.
+- **In-app guide** (10-section How to Play), **FAQ/Trust page**, **contact/status pages**, and **privacy/terms** — all built as first-class React views.
 
 ---
 
@@ -120,10 +123,10 @@ Multi-layer security posture for a public-facing app with real users:
 | **Frontend** | React 19, TypeScript, Vite, Zustand |
 | **Backend** | FastAPI, SQLModel, Pydantic v2, Uvicorn/Gunicorn |
 | **Database** | PostgreSQL 16 |
-| **Cache/PubSub** | Redis 7 — cross-worker SSE broadcast (pub/sub), shared game cache, derived scoring TTL cache |
+| **Cache/PubSub** | Redis 7 — cross-worker SSE broadcast (pub/sub), shared game cache, derived scoring TTL cache, **leaderboard pre-computation cache** |
 | **ML** | scikit-learn (`HistGradientBoostingRegressor`, GMM), NumPy, pandas, joblib |
 | **Real-time** | SSE (`sse-starlette`) — draft room, live scores, and **event-driven notifications**; Web Push (VAPID) for OS-level alerts |
-| **Data** | MLB Stats API (rosters, depth charts, game logs, play-by-play, transactions), Statcast (pybaseball) |
+| **Data** | MLB Stats API (rosters, depth charts, game logs, play-by-play, transactions), Statcast (pybaseball), **ESPN DTD injury scraper** |
 | **Auth** | JWT + bcrypt, email verification + password reset (Resend) |
 | **Infra** | Multi-stage Docker image, **cloud VPS** + Cloudflare Tunnel |
 
@@ -239,18 +242,32 @@ Real-time **bid / let-go** recommendations during the auction:
 
 - Combines **auction value**, **positional scarcity**, **roster need**, and **budget advantage** into a composite score
 - Four action tiers: **Must Have**, **Bid Aggressively**, **Bid Moderately**, **Let Go** — with natural-language reasoning
+- **Injury-aware:** IL-eligible players are flagged in reasoning with status labels (IL10, IL60)
 - Local bid tracking: when the price rises past the recommended ceiling, the panel updates instantly (no API round-trip)
 - Uses the same pricing curves and projections as bot valuations, so advisor recommendations align with the market bots create
 
 ### 5. Lineup optimizer
 
-**Constrained greedy assignment** (two-pass): fill most-constrained positional slots first (fewest eligible candidates), then flex/utility with best remaining. Uses projection engine for (per-game pts × games this week × gear boost fraction). Same diminishing-returns and positive-cap pipeline as live scoring for gear. Provides natural-language START/BENCH reasoning per player. Respects roster locks (won't move players whose MLB games have started).
+**Constrained greedy assignment** (two-pass): fill most-constrained positional slots first (fewest eligible candidates), then flex/utility with best remaining. Uses projection engine for (per-game pts × games this week × gear boost fraction). Same diminishing-returns and positive-cap pipeline as live scoring for gear. Provides natural-language START/BENCH reasoning per player. Respects roster locks (won't move players whose MLB games have started). **Injured starters are auto-benched** even when their team is playing.
 
 Product messaging: **in-house statistical ML**, not generative AI.
 
 ---
 
 ## System design highlights
+
+### Research Hub
+
+Multi-tab player intelligence center — the primary discovery surface for all roster decisions:
+
+- **Search:** Debounced player search (300ms) with Browse by Team grid (all 30 MLB teams). Player deep-dives show MLB Stats API season stats, last 10 game logs, Dugout fantasy context (tier, pitcher role, projection, ownership, equipped gear count), today's matchup, and **Statcast chips** (xBA, barrel%, hard-hit%, etc.).
+- **Leaderboard:** Ranked by actual accrued fantasy points from `PlayerGameLog` aggregates (not projections). Sortable by Season Pts / Pts/Game / Projected, filterable by position (All, C, 1B, 2B, 3B, SS, OF, DH, P), paginated (25/page with Load More). Per-league ownership badges. **Redis-cached** with 5-minute background refresh via APScheduler — reads are near-instant.
+- **Free Agents:** Same filterable/sortable/paginated view as leaderboard, filtered to unowned players. **Waiver hold badges** show the exact date a recently-dropped player becomes available — no guesswork.
+- **Compare:** Side-by-side comparison of up to 3 players with season stats, fantasy point estimates, ML projections, tier badges, and ownership.
+
+**Season Points Estimator:** Per-player endpoint applies the league's scoring weights to MLB season stats, producing a category-by-category breakdown with totals and per-game averages. Custom scoring leagues get correctly weighted estimates.
+
+**Team Profiles:** Full team pages with active roster (ownership overlay), upcoming 7-day schedule, division standings (W/L/GB), and team logos.
 
 ### Real-time draft room
 
@@ -262,11 +279,15 @@ In-memory **auction state machine** (nomination → bidding → timers) with **S
 
 **Pitcher pacing:** enforces filling 9 pitching lineup slots (Yahoo-style) so teams don't end draft-heavy on hitters. Bots always auto-nominate on their turn even if the commissioner disables global auto-nominate for humans — so drafts don't stall.
 
+**Injury-aware draft:** IL-eligible players receive 50% reduced opening bids and auction valuations, with injury status displayed in the draft room and advisor reasoning.
+
 ### Live scoring pipeline
 
 15-second **MLB Stats API polling** → detect in-progress games → fetch box scores → compute fantasy points with **gear modifier engine** (caps, diminishing "all" stacks, penalties after cap) → update `FantasyLiveAccrual` rows with delta tracking → **SSE broadcast** to connected clients.
 
-**Gear snapshots** are frozen at first accrual so mid-game equipment swaps don't retroactively change scoring. When games go final: reverse all live accruals → apply authoritative final scoring with **Statcast enrichment** (foul balls, barrel data, pitch speeds) → **play-by-play parsing** (fielding credits, ABS challenges, trailing HR detection) → loot rolls → coin grants → persist `PlayerGameLog` for ML retraining.
+**Gear snapshots** are frozen at first accrual so mid-game equipment swaps don't retroactively change scoring. **Every `UserPlayerGameScore` row** — starters and bench — stores a complete `gear_snapshot_json` recording exactly which gear pieces were equipped at the time of scoring. This creates an immutable audit trail: when scoring discrepancies are reported, the historical gear state can be replayed against game stats to verify the exact point calculation. Snapshots are surfaced in the scoring breakdown UI for full transparency.
+
+When games go final: reverse all live accruals → apply authoritative final scoring with **Statcast enrichment** (foul balls, barrel data, pitch speeds) → **play-by-play parsing** (fielding credits, ABS challenges, trailing HR detection) → loot rolls → coin grants → persist `PlayerGameLog` for ML retraining.
 
 **Stale accrual reconciliation** runs every tick — cleans up phantom rows from postponed/cancelled games, zeroes orphaned accruals from interrupted deploys.
 
@@ -286,11 +307,22 @@ Two-tier notification system — **Live Highlights** and **Play-by-Play** — de
 
 **Play-by-Play:** Every positive stat event — singles, doubles, walks, runs scored, individual RBIs, individual pitching strikeouts. Gives engaged users a real-time feed of their roster's performance without needing to watch every game.
 
+### Injury List management
+
+Full IL overhaul with **2 IL slots** that don't count against the 24-player active roster cap (MAX_ROSTER = 26):
+
+- **`is_il_eligible()`** validates against MLB injury designations: IL10, IL15, IL60, DTD (case-insensitive).
+- **Bot IL management:** `_manage_bot_il()` automatically moves injured players to IL slots and activates recovered players.
+- **Injury-aware bot trades:** Personality-specific `injury_discount` (0.0–1.0) applied to trade valuations. Value Hunter bots stash injured Stars/Starters; Late Surge bots avoid injured players near playoffs.
+- **Droppable overrides:** Stars are normally undroppable, but injured Stars become droppable when IL slots are full — strategic roster decisions.
+- **ESPN DTD scraper:** Supplemental `poll_dtd()` job scrapes ESPN's Day-to-Day injury page with name normalization, merging with MLB API transaction data without overwriting more severe designations.
+- **Injury badges** displayed across all surfaces: draft room, research, waiver wire, team profiles, player search results.
+
 ### Waiver system
 
 Daily processing at **8 AM ET**. Dropped players sit on waivers for **2 days** before becoming free agents. Bot waiver engine runs in phases: replace injured starters → fill empty slots by positional need → positional rebalancing → upgrade worst bench player. Tier-aware drop protection (Stars never droppable; Starters require 3× projection margin). Value Hunter bots stash IL-eligible Stars/Starters.
 
-**Waiver hold visibility:** Player search results surface waiver hold status inline — users see when a recently dropped player becomes available without navigating away. Enhanced denial notifications explain *why* a claim was denied (hold window, roster cap, position eligibility) so users aren't left guessing.
+**Waiver hold visibility:** Player search results and the Research Hub's Free Agents tab surface waiver hold status inline with date badges — users see exactly when a recently dropped player becomes available without navigating away. Enhanced denial notifications explain *why* a claim was denied (hold window, roster cap, position eligibility) so users aren't left guessing.
 
 ### Bot trade engine
 
@@ -326,7 +358,7 @@ Clickable matchup history rows expand inline to show the full player-by-player s
 
 ### MLB transaction monitoring
 
-Every 15 minutes: poll MLB transactions API for injuries, DFA, trades, activations. Auto-updates player `injury_status` and pushes notifications to roster owners ("Justin Verlander placed on 15-day IL").
+Every 15 minutes: poll MLB transactions API for injuries, DFA, trades, activations. Auto-updates player `injury_status` and pushes notifications to roster owners ("Justin Verlander placed on 15-day IL"). **ESPN DTD scraper** supplements the MLB API with Day-to-Day designations that the official feed sometimes omits.
 
 ### Performance engineering
 
@@ -343,6 +375,8 @@ Zero frontend changes, zero new dependencies, identical API response shapes. All
 
 **Matchup page overhaul:** The heaviest user-facing page (matchup detail with full player-by-player scoring breakdown) originally fired 4 sequential HTTP requests totaling **55–70 DB queries** on initial load — and re-fired all of them every 30 seconds. Refactored into a **combined endpoint** (single request, ~30–34 queries) with a **lightweight scores-only polling endpoint** (~5 queries via batched derivation with 10s in-memory cache). Frontend uses **hash-based change detection**: polls return a content hash; if unchanged, the UI does nothing; if changed, it updates displayed scores immediately and refetches the full detail in the background. Result: **50–60% fewer queries on cold load, 90–95% fewer on poll cycles**, with zero visible latency to the user.
 
+**Research Hub caching:** The leaderboard and free agents endpoints aggregate `PlayerGameLog.raw_fantasy_points` across all current-season games — expensive when run per-request for 700+ MLB players. A **Redis-backed pre-computation cache** rebuilds every 5 minutes via an APScheduler background job. Endpoint reads are near-instant (Redis GET + JSON deserialize); on cache miss, a synchronous fallback queries the DB directly. Free agents share the same cache and filter out owned players per-league.
+
 ### Cross-worker consistency (Redis)
 
 Multi-worker Gunicorn deployments introduce split-brain risk for in-memory state. Redis pub/sub solves this:
@@ -350,6 +384,7 @@ Multi-worker Gunicorn deployments introduce split-brain risk for in-memory state
 - **SSE fan-out:** When Worker A scores a game, it publishes the event to Redis; Workers B–N receive it and push to their connected SSE clients. Every user sees the update regardless of which worker their connection hit.
 - **Shared game cache:** Live game state (schedule, scores, in-progress flags) is stored in Redis so all workers read from the same source of truth. The scheduler writes; API workers read — no stale-cache divergence.
 - **Draft room coordination:** Auction bids, nominations, and timer events are broadcast via Redis channels so multi-worker draft sessions stay synchronized.
+- **Leaderboard pre-computation:** Background scheduler builds the full leaderboard cache into Redis every 5 minutes; all API workers read from the same pre-computed result — no per-request aggregation.
 
 Graceful fallback: if Redis is unavailable, the app falls back to single-process in-memory state — solo development and single-worker deployments work without Redis configured.
 
@@ -372,20 +407,20 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 
 **~200 gear templates** across 8 slots and 6 rarity tiers. Two drop paths:
 
-1. **Challenge triggers:** specific stat lines unlock specific items (e.g. "3+ hits, 0 walks" → Molitor's Iron Band). ABS challenges, trailing HRs, fielding plays, day/night games, and doubleheaders all factor into trigger conditions.
+1. **Challenge triggers (guaranteed):** Specific stat lines deterministically unlock specific items (e.g. "3+ hits, 0 walks" → Molitor's Iron Band). ABS challenges, trailing HRs, fielding plays, day/night games, and doubleheaders all factor into trigger conditions. Challenge drops are **deterministic** — no probabilistic gate. **Gear fatigue** limits each player to 5 Common/Uncommon challenge drops per season; Rare and above triggers are fatigue-exempt.
 2. **Rarity rolls:** when a player exceeds their projection (threshold varies by tier: bench 1.15×, star 1.30×), a weighted random roll picks a rarity. **Tier-weighted rarity** gives bench/platoon players lower thresholds and an uncommon floor (never roll Common from projection beats).
 
 **Role-based loot filtering:** Loot drop pools are filtered by `PitcherRole` — a closer never rolls Wins+ or Quality Start gear, a starter never rolls Saves+ gear. Position-aware restrictions also prevent hitting-stat gear (HR+, SB+) from dropping for pure pitchers and pitching-stat gear from dropping for pure hitters. Two-way players are eligible for both pools. The same restrictions apply at the equip endpoint and for bot gear assignment.
 
 **Streak triggers** span multiple games: 20+ hit streak (Mythic), 6-game HR streak (Mythic), 50+ consecutive starts (Mythic), 30+ consecutive starts (Legendary), 5 consecutive quality starts with ≤1 ER (Legendary), 5+ consecutive SB without CS, 3+ weekly saves, 3+ consecutive matchup wins. Challenge difficulty is calibrated to rarity tier — Mythic triggers are statistically near-impossible, while Uncommon triggers fire on solid but achievable performances.
 
-**Mythic items** (0.5% base weight): Babe Ruth's Called Shot Bat (490+ ft HR), Billy Hamilton's 1890 Cleats (4+ SB), Jeter's Flip Glove (SS, 5+ assists in a win), Gibson's 1968 Visor (8+ IP, 0 ER, 10+ K), and more. **Event-awarded gear** can be admin-granted for historic real-world moments (soulbound, non-tradeable).
+**Mythic items** (0.5% base weight): Babe Ruth's Called Shot Bat (490+ ft HR), Billy Hamilton's 1890 Cleats (4+ SB), Jeter's Flip Glove (SS, 5+ assists in a win), Gibson's 1968 Visor (8+ IP, 0 ER, 10+ K), and more. **Event-awarded gear** can be admin-granted for historic real-world moments (soulbound, non-tradeable, non-salvageable).
 
 ### Anti-snowball mechanics
 
 - **60% positive boost cap** per player; penalties uncapped (risk stays real)
 - **Diminishing "all" stacking:** successive all-category modifiers apply at [1.0, 0.75, 0.50, 0.35, 0.25, 0.20, 0.15, 0.10] effectiveness
-- **Gear fatigue:** each player can only produce 5 challenge drops per season per user/league
+- **Gear fatigue:** each player can only produce 5 Common/Uncommon challenge drops per season per user/league; Rare+ triggers are fatigue-exempt
 - **Season rarity ceiling:** days 0–14 max Rare; 14–42 max Epic; 42–70 max Legendary; 70+ Mythic unlocked
 - **Diminishing daily drops:** 1st drop today = 100%, 2nd = 50%, 3rd = 25%, 4th+ = 10%
 - **Daily-use gear lock:** prevents swapping gear between players on the same calendar day
@@ -429,7 +464,7 @@ With the right gear equipped, a reliever earning holds suddenly generates real f
 - **Batter:** max exit velo, barrel rate per PA, whiff rate, hard-hit rate
 - **Pitcher:** avg pitch speed, whiff rate, called-strike percentage
 
-Statcast data feeds into projections (15 hitter / 14 pitcher features), the research player deep-dive UI, gear trigger conditions, and team-level opposing-lineup quality aggregates.
+Statcast data feeds into projections (15 hitter / 14 pitcher features), the Research Hub player deep-dive UI (as interactive "Statcast chips"), gear trigger conditions, and team-level opposing-lineup quality aggregates.
 
 ---
 
@@ -449,14 +484,16 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the rese
 | Bot management | Daily 10 AM ET | Auto-lineup, gear management, bot waivers + trades |
 | Waiver processing | Daily 8 AM ET | Per-league waiver claims + post-waiver bot lineup optimize |
 | Bot economy | Every 90 min (staggered per-bot) | Trade proposals, inbox resolution, marketplace buy/sell; each bot fires with random 0–30 min jitter |
+| Leaderboard cache | Every 5 min | Pre-compute Research Hub leaderboard into Redis from `PlayerGameLog` aggregates |
 | Game reminders | Every 15 min | Smart daily alert when roster players' games are about to start; deduped to one per user per day |
 | MLB transactions | Every 15 min | Injury/DFA/trade updates, pushes to roster owners |
+| ESPN DTD scraper | Every 15 min | Supplemental Day-to-Day injury data from ESPN |
 
 ---
 
 ## Testing
 
-**669+** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, IL management, live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops, **gear-only scoring categories**, **56 pitcher mitigation/role gear trigger tests** — positive fires, negative edge cases, hardened Mythic/Legendary thresholds, streak triggers), **bot marketplace intelligence** (self-usefulness hold logic, stale listing repricing/salvage, single-bot integration), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), and integration-style API flows against SQLite fixtures.
+**720+** automated tests (pytest) across auth, scoring, balance, matchup scheduling, projections (**Marcel multi-year baseline**, feature extraction, recency weights, model persistence/fingerprint validation, train→persist→load→predict cycle, stale model rejection, **early-season blend ramp/dampening, confidence scaling with model weight, two-way player projection combining, reliever-specific reliability denominator**), **player classifier** (tier assignment, **career volume guards**, **pitcher role classification** — SP/CL/SU/MR/SW/UNK scenarios, **`_is_reliever` position guard**), lineup optimizer, **draft pricing** (46 curve/bot/economy sanity tests), **trade-waiver conflict guards** (overlapping proposals, chronological resolution, auto-cancellation), trades, **IL overhaul** (100 tests — IL slot management, bot IL automation, injury-aware draft/trades, droppable overrides, ESPN DTD scraping, admin gear awards, guaranteed challenge triggers with fatigue), **Research Hub** (leaderboard aggregation, season filtering, position filters, pagination, ownership, free agent exclusion), live accrual reconciliation, **gear triggers** (role-based loot filtering, **gear stat eligibility** — position/role restrictions for equip and drops, **gear-only scoring categories**, **56 pitcher mitigation/role gear trigger tests** — positive fires, negative edge cases, hardened Mythic/Legendary thresholds, streak triggers, **gear snapshot round-trip** — 21 tests covering snapshot storage, reconstruction, penalty gear, and compute-with-override), **bot marketplace intelligence** (self-usefulness hold logic, stale listing repricing/salvage, single-bot integration), **waiver hold visibility** (hold window surfacing, denial notifications), **batch projection** (`project_players_batch` round-trip), **transaction export** (league isolation, column ordering, multi-user inclusion), **season point estimator** (hitter/pitcher/TWP weight application), and integration-style API flows against SQLite fixtures.
 
 ---
 
@@ -489,9 +526,10 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Admin key for dangerous routes** | Maintenance without exposing "hidden" power endpoints |
 | **Bot personality archetypes** | 5 deterministic profiles (16 knobs each) vs. random behavior; makes AI opponents feel distinct all season |
 | **Flexible league sizes** | Commissioner-driven bot fill vs. forced 10-player roster; lowers barrier to starting a league |
-| **Gear snapshot at game start** | Prevents mid-game equipment swaps from retroactively changing live accrual; frozen state replayed on final scoring |
+| **Gear snapshot audit trail** | Every `UserPlayerGameScore` stores `gear_snapshot_json` — the complete gear state at time of scoring. Enables post-hoc verification of any scoring discrepancy by replaying the exact modifier pipeline against persisted game stats. Snapshots copy from live accruals when available; fallback captures current equipped gear at finalization |
 | **Rolling weekly trade cap** | Season-phase-aware throttle (2→3→5/week) vs. flat cooldown; bots feel more desperate near playoffs without flooding early |
 | **Gear-created scoring categories** | Holds, innings pitched, and foul balls have base weight = 0.0 — invisible by default. Specific gear activates them, turning traditionally worthless fantasy assets (setup men, middle relievers) into point producers. Solves the industry-wide middle reliever problem without inflating baseline scoring or requiring commissioner config. Mitigation gear absorbs negative stat penalties (e.g., −22% ER) for a second gear dimension |
+| **Deterministic challenge triggers** | Challenge drops fire deterministically on qualifying stat lines (no RNG gate). Gear fatigue (5 drops/player/season for Common/Uncommon) prevents over-farming from one hot player; Rare+ triggers bypass fatigue entirely — exceptional performances are always rewarded |
 | **Season rarity ceiling + gear fatigue** | Prevents early-season Legendary/Mythic stockpiling and excessive drops from one hot player |
 | **Week-scaled shop pricing** | Price cap ramps with the season (400 → 600 → 1000 → 1500 → uncapped) so early shops are attainable; 1 aspirational "stretch" item per rotation |
 | **Startup secret enforcement** | App crashes if `DUGOUT_SECRET_KEY` is missing/default; Docker Compose uses `:?` required-variable syntax — no silent insecure deployments |
@@ -511,6 +549,10 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Combined matchup endpoint** | Merged 2 sequential API calls (summary → detail waterfall) into a single endpoint that resolves the matchup internally and returns both summary + full player-level detail; eliminates the round-trip dependency and halves cold-load queries |
 | **Hash-based smart polling** | Lightweight scores endpoint returns an MD5 content hash alongside point totals; frontend compares hashes and only refetches the full detail when scores actually change — 90–95% of poll cycles do zero heavy DB work |
 | **Redis pub/sub for multi-worker SSE** | Single Gunicorn worker scores a game → publishes to Redis → all workers push to their SSE clients; graceful fallback to in-memory for single-worker/dev deployments |
+| **Redis leaderboard pre-computation** | Research Hub leaderboard aggregates `raw_fantasy_points` across all current-season `PlayerGameLog` rows — too expensive per-request for 700+ players. Background APScheduler job rebuilds every 5 minutes into Redis; endpoints read from cache with synchronous DB fallback on miss |
+| **IL slot separation from active roster** | 2 IL slots (MAX_ROSTER = 26, ACTIVE_ROSTER_MAX = 24) let users replace injured players without dropping them. Bot personality drives IL strategy: Value Hunter stashes injured stars, Late Surge avoids injury risk near playoffs |
+| **ESPN DTD as supplemental data source** | MLB Stats API sometimes omits Day-to-Day designations. ESPN scraper fills the gap without overwriting more severe IL10/IL15/IL60 statuses — additive merge with name normalization for accent characters and team variations |
+| **Admin event gear (soulbound)** | `GearOrigin.AWARDED` items are non-salvageable and non-listable on the marketplace — soulbound rewards for historic real-world moments. Deduplication prevents double-awards; bots are excluded from distribution |
 
 ---
 
