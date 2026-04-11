@@ -1,6 +1,6 @@
 # Dugout — Fantasy Baseball RPG Platform
 
-> Full-stack fantasy baseball with RPG equipment, a player-driven coin economy, and in-house ML on real MLB data. **Live production** app behind Docker, PostgreSQL, Redis, and Cloudflare (Tunnel + edge TLS).
+> Full-stack fantasy baseball with RPG equipment, a player-driven coin economy, and in-house ML on real MLB data. **Live production** app behind Docker, AWS RDS PostgreSQL, Redis, and Cloudflare (Tunnel + edge TLS).
 
 **[Live app](https://dugoutfantasy.com)** · Private source · [Screenshots](SCREENSHOTS.md) · [Overview](#overview) · [Security](#security--production-hardening) · [Architecture](#architecture) · [ML pipeline](#ml-pipeline) · [System design](#system-design-highlights) · [Economy](#economy--balance-engineering) · [Ops](#operations) · [Testing](#testing)
 
@@ -27,7 +27,7 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **8 equipment slots** per player (hat, shades, chain, jersey, glove, bat, wristband, cleats) with **6 rarity tiers** (Common → Mythic).
 - **~200 gear items** with challenge-based unlock triggers, performance-gated rarity rolls, and soulbound loot; **marketplace** resales with tax sinks. **Gear-created scoring categories** (holds, innings pitched, foul balls) turn traditionally worthless fantasy assets — setup men, middle relievers — into real point producers.
 - **Auction draft** with an **AI advisor panel** (real-time bid/let-go recommendations, natural-language reasoning) and **bot opponents** that bid with distinct personalities. **Injury-aware auction values** — IL-eligible players receive 50% reduced opening bids.
-- **5 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge) — **persisted per bot** with **19 tunable knobs** per archetype, used **all season**: draft bidding, waivers, trades, marketplace, lineup optimization, gear equipping, and **pitcher streaming**.
+- **6 bot personality archetypes** (Stars & Scrubs, Balanced, Value Hunter, Position Scarcity, Late Surge, Gear Grinder) — **persisted per bot** with **20 tunable knobs** per archetype, used **all season**: draft bidding, waivers, trades, marketplace, lineup optimization, gear equipping, **pitcher streaming**, and **shop buying**.
 - **Flexible league sizes** — commissioners can **fill empty slots with AI managers** in pre-season. Play with 3 friends and 7 bots, or any mix.
 - **Switch Mode** moves between Solo and League contexts with **independent rosters, gear, scores, and matchups**.
 - **Live scoring** with 15-second box score polling, in-game fantasy point accrual with **gear snapshot freezing**, and **live box scores** with real-time current-batter highlighting (MLB ID matching via linescore API). **Merge-based frontend updates** — game state diffs are compared field-by-field so the UI only re-renders when data actually changes (no poll-cycle flicker). Yesterday's finals are auto-evicted from the live page once today's first pitch is thrown.
@@ -62,9 +62,11 @@ Multi-layer security posture for a public-facing app with real users:
 
 | Control | Implementation |
 |---------|----------------|
-| **JWT** | HS256 access tokens via `python-jose`; bcrypt password hashing (12 rounds) |
+| **JWT** | HS256 access tokens via `PyJWT`; bcrypt password hashing (12 rounds); **auto-logout on 401** — expired tokens clear client-side and redirect to login |
 | **Secret key** | App **crashes on startup** if `DUGOUT_SECRET_KEY` is missing or set to a known placeholder — no silent fallback to a default |
-| **Docker Compose** | Uses `${VAR:?error}` syntax for `POSTGRES_PASSWORD` and `DUGOUT_SECRET_KEY` — Compose refuses to start without secrets in `.env` |
+| **Docker Compose** | Uses `${VAR:?error}` syntax for `DATABASE_URL` and `DUGOUT_SECRET_KEY` — Compose refuses to start without secrets in `.env` |
+| **Health endpoint** | Non-admin callers see only `{"status": "ok"}` — internal diagnostics (DB status, scheduler state, uptime) require admin API key |
+| **Error sanitization** | API error responses return generic messages; exception details are logged server-side only, never leaked to clients |
 | **Verification codes** | Generated with `secrets` module (CSPRNG); compared with `hmac.compare_digest` (timing-safe) |
 | **Password reset** | Email-based 6-digit code via Resend; rate-limited (3 req/min send, 5/min reset); silent success on unknown emails to prevent enumeration |
 
@@ -116,9 +118,12 @@ Multi-layer security posture for a public-facing app with real users:
 │  │          │  + shared cache) │  └────────────────────┘   │  │
 │  │          └──────────────────┘                            │  │
 │  └──────────────────────────────────────────────────────────┘  │
-│  ┌─────────────────────────────────────────────────────────┐  │
-│  │  PostgreSQL 16 (volume)    Redis 7 (ephemeral)          │  │
-│  └─────────────────────────────────────────────────────────┘  │
+│  └──────────────────────────────────────────────────────────┘  │
+└──────────┬───────────────────────────────────────────────────┘
+           │
+┌──────────▼───────────────────────────────────────────────────┐
+│  AWS RDS PostgreSQL 16          Redis 7 (ephemeral, in-app)  │
+│  (managed, automated backups)                                 │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -126,13 +131,13 @@ Multi-layer security posture for a public-facing app with real users:
 |-------|-------|
 | **Frontend** | React 19, TypeScript, Vite, Zustand |
 | **Backend** | FastAPI, SQLModel, Pydantic v2, Uvicorn/Gunicorn |
-| **Database** | PostgreSQL 16 |
-| **Cache/PubSub** | Redis 7 — cross-worker SSE broadcast (pub/sub), shared game cache, derived scoring TTL cache, **leaderboard pre-computation cache** |
+| **Database** | AWS RDS PostgreSQL 16 (managed, automated backups, `pool_pre_ping` + connection recycling) |
+| **Cache/PubSub** | Redis 7 — cross-worker SSE broadcast (pub/sub), shared game cache, derived scoring TTL cache, **leaderboard pre-computation cache**, **distributed draft room state** |
 | **ML** | scikit-learn (`HistGradientBoostingRegressor`, GMM), NumPy, pandas, joblib |
 | **Real-time** | SSE (`sse-starlette`) — draft room, live scores, and **event-driven notifications**; Web Push (VAPID) for OS-level alerts |
 | **Data** | MLB Stats API (rosters, depth charts, game logs, play-by-play, transactions), Statcast (pybaseball), **ESPN DTD injury scraper** |
 | **Auth** | JWT + bcrypt, email verification + password reset (Resend) |
-| **Infra** | Multi-stage Docker image, **cloud VPS** + Cloudflare Tunnel |
+| **Infra** | AWS EC2 + **RDS PostgreSQL** (7-day automated backups, point-in-time recovery), Multi-stage Docker image, Cloudflare Tunnel |
 
 ---
 
@@ -275,13 +280,15 @@ Multi-tab player intelligence center — the primary discovery surface for all r
 
 ### Real-time draft room
 
-In-memory **auction state machine** (nomination → bidding → timers) with **SSE** fan-out. Draft persistence is intentional trade-off: sub-second bid latency vs. surviving process restarts.
+**Redis-backed auction state machine** (nomination → bidding → timers) with **SSE** fan-out. Authoritative `DraftRoom` state is serialized to Redis (`dugout:draft:room:{league_id}`) so all Gunicorn workers can read/write draft state — bids, nominations, and auto-nominate toggles work regardless of which worker handles the request. **Distributed locking** (`dugout:draft:lock:{league_id}`) serializes concurrent mutations (bid races, timer expiry) across workers. League-ID-scoped keys provide complete isolation for concurrent drafts. 4-hour TTL auto-expires abandoned rooms. Graceful fallback to in-memory state when Redis is unavailable (local dev).
 
-**Bot bidding engine:** 5 personality archetypes with per-archetype knobs (tier multipliers, bid increments, timing profiles, drain nomination probability). Highest-valuation bot bids first; personality-aware increments; "fight" behavior where bots near their ceiling occasionally push 5–20% beyond. **Pass chance** (0–50%) creates natural "steal" windows. **Position-diversity nomination** tracks a sliding window of last 5 picks — if 4+ pitchers, forces a hitter and vice versa.
+**Bot bidding engine:** 6 personality archetypes with per-archetype knobs (tier multipliers, bid increments, timing profiles, drain nomination probability). Highest-valuation bot bids first; personality-aware increments; "fight" behavior where bots near their ceiling occasionally push 5–20% beyond. **Pass chance** (0–50%) creates natural "steal" windows. **Position-diversity nomination** tracks a sliding window of last 5 picks — if 4+ pitchers, forces a hitter and vice versa. **Gear Grinder trigger-hunter nudge:** boosts draft valuations 10–12% for high-K pitchers and high-volume hitters whose stat profiles trigger more gear drops.
 
 **AFK assistance:** after 10 picks without activity, AI nominates via the draft agent; bidding uses incremental raises with a "desperate roster" path so late-draft $1 fills still happen when roster slots outpace budget headroom.
 
-**Pitcher pacing:** enforces filling 9 pitching lineup slots (Yahoo-style) so teams don't end draft-heavy on hitters. Bots always auto-nominate on their turn even if the commissioner disables global auto-nominate for humans — so drafts don't stall.
+**Per-user auto-nominate:** Each drafter independently toggles whether AI nominates on their turn — not a league-wide switch. When enabled, the server-side `_schedule_next_nomination` checks the current nominator's `DraftMember.auto_nominate` flag and dispatches AI nomination only for that member. Toggling mid-draft immediately triggers or cancels AI nomination if it's your turn, with real-time SSE broadcast of the per-user state change to all clients.
+
+**Pitcher pacing:** enforces filling 9 pitching lineup slots (Yahoo-style) so teams don't end draft-heavy on hitters. Bots always auto-nominate on their turn regardless of human settings — so drafts don't stall.
 
 **Injury-aware draft:** IL-eligible players receive 50% reduced opening bids and auction valuations, with injury status displayed in the draft room and advisor reasoning.
 
@@ -332,7 +339,7 @@ Daily processing at **8 AM ET**. Dropped players sit on waivers for **2 days** b
 - **Hold-aware FA targeting:** Queries `WaiverHold` to filter out FAs still on waivers past their game date. FAs are scored by `(soonest start ASC, projection DESC)` to prioritize immediately available arms.
 - **Gear-aware sliding scale:** Instead of a binary gear cutoff, gear value inflates the pitcher's effective projection using `gear_val × (1.0 − streaming_aggression)`. Aggressive bots (Stars & Scrubs, aggression=0.70) discount gear heavily — they'll eat a Rare hat loss for a stud stream target. Conservative bots (Value Hunter, aggression=0.15) protect gear investment. **Legendary+ gear stacks (≥ 0.35 bonus) are always protected** — no human drops those.
 - **FA must justify the swap:** Stream targets must project higher than the spent pitcher's gear-inflated effective value. No more blindly replacing a good pitcher with a mediocre one just because the schedule says so.
-- **Personality-driven gating:** `streaming_aggression` (daily probability, 0.15–0.70 by archetype) and `streaming_max_per_week` (1–4 cap) control volume. Late Surge bots scale aggression with the season-phase multiplier.
+- **Personality-driven gating:** `streaming_aggression` (daily probability, 0.15–0.70 by archetype) and `streaming_max_per_week` (1–4 cap) control volume. Late Surge bots scale aggression with the season-phase multiplier. Gear Grinder bots stream conservatively (aggression=0.20, 1/week) — they're focused on gear, not pitching matchups.
 
 **Phase 2 personality gating:** Bench upgrades are probabilistically gated by `phase2_upgrade_chance` (0.40–0.80 by archetype). Stars & Scrubs bots upgrade 80% of the time; Value Hunter bots only 40%. Late Surge bots scale their chance with the season-phase surge multiplier. This simulates a human "holding" bench players for upcoming matchups rather than mindlessly optimizing every night.
 
@@ -344,7 +351,7 @@ Daily processing at **8 AM ET**. Dropped players sit on waivers for **2 days** b
 
 ### Bot marketplace intelligence
 
-Bots don't just randomly list and buy gear — they make personality-driven decisions that mimic engaged human players:
+Bots don't just randomly list and buy gear — they make personality-driven decisions that mimic engaged human players. **Gear Grinder bots** are the most active marketplace participants (~2.5× the listing rate of Value Hunters), sell at discount for volume (`greed_markup=0.92`), pay full retail for upgrades, and **buy from the weekly shop** aggressively (`shop_buy_eagerness=0.70`):
 
 - **Smart listing:** Before listing rare+ gear, bots check if the item would be an upgrade for one of their own starters. If it would, they hold it — even if they could profit from the sale.
 - **Stale listing management:** Unsold listings older than 48 hours are automatically repriced (25% discount) or salvaged for coins (40% chance), keeping the marketplace fresh.
@@ -385,7 +392,13 @@ Full-app audit across **16 backend files** (11 API routes + 5 background service
 
 Zero frontend changes, zero new dependencies, identical API response shapes. All tests pass unchanged.
 
-**Additional optimizations:** Composite database indexes on hot query paths, PostgreSQL tuning (`shared_buffers`, `work_mem`, `effective_cache_size`), in-memory TTL caches for MLB API calls and derived scoring, and multi-worker Gunicorn configuration. Estimated **~10× capacity improvement** per DB connection.
+**Additional optimizations:** Composite database indexes on hot query paths (including `MarketplaceListing.sold`, `PlayerSeasonStats.season`), **AWS RDS connection pooling** (`pool_pre_ping`, `pool_recycle: 1800s`, pool size 5 + 10 overflow), in-memory TTL caches for MLB API calls and derived scoring, and multi-worker Gunicorn configuration. Estimated **~10× capacity improvement** per DB connection.
+
+**Vectorized Statcast processing:** Replaced row-by-row `iterrows()` DataFrame loops with vectorized pandas operations (`set_index` → `rename` → `to_dict("index")`) across all 4 Statcast data pipelines (batter expected, batter barrels, pitcher expected, pitcher barrels). Significant speedup for the nightly Statcast cache refresh with identical output.
+
+**Batch week-points derivation:** `finalize_week_matchups` previously called `_derive_week_points` per-user (N×5 queries for N users). Replaced with `_derive_week_points_batch` that resolves all users' week points in ~5 total queries — roster slots, game scores, game logs, and live accruals fetched once and partitioned in-memory. Falls back to per-user derivation on cache miss.
+
+**Bot roster fill player cache:** Bot roster fill operations (`fill_bot_rosters_for_league`) previously ran `select(Player)` on every iteration of the fill loop. Refactored to load the full player table once and pass it as `_player_cache` through the call chain — eliminates redundant full-table scans during draft and waiver processing.
 
 **Matchup page overhaul:** The heaviest user-facing page (matchup detail with full player-by-player scoring breakdown) originally fired 4 sequential HTTP requests totaling **55–70 DB queries** on initial load — and re-fired all of them every 30 seconds. Refactored into a **combined endpoint** (single request, ~30–34 queries) with a **lightweight scores-only polling endpoint** (~5 queries via batched derivation with 10s in-memory cache). Frontend uses **hash-based change detection**: polls return a content hash; if unchanged, the UI does nothing; if changed, it updates displayed scores immediately and refetches the full detail in the background. Result: **50–60% fewer queries on cold load, 90–95% fewer on poll cycles**, with zero visible latency to the user.
 
@@ -397,10 +410,21 @@ Multi-worker Gunicorn deployments introduce split-brain risk for in-memory state
 
 - **SSE fan-out:** When Worker A scores a game, it publishes the event to Redis; Workers B–N receive it and push to their connected SSE clients. Every user sees the update regardless of which worker their connection hit.
 - **Shared game cache:** Live game state (schedule, scores, in-progress flags) is stored in Redis so all workers read from the same source of truth. The scheduler writes; API workers read — no stale-cache divergence.
-- **Draft room coordination:** Auction bids, nominations, and timer events are broadcast via Redis channels so multi-worker draft sessions stay synchronized.
+- **Draft room state:** The full `DraftRoom` (members, auction, completed picks, nomination order, deadlines) is serialized to Redis as JSON. Every REST mutation (bid, nominate, toggle-auto, pause) acquires a per-league distributed lock, loads the latest state, mutates, saves back, and releases — so 2+ Gunicorn workers can handle draft requests interchangeably. The timer thread loads fresh state each tick and uses a non-blocking lock attempt to prevent double-firing across workers. League-ID-scoped keys (`dugout:draft:room:{id}`, `dugout:draft:lock:{id}`) provide complete isolation for concurrent drafts — 10 leagues drafting simultaneously never see each other's state or events.
+- **Draft SSE coordination:** Auction bids, nominations, and timer events are broadcast via Redis pub/sub channels (`dugout:draft:{league_id}`) so multi-worker draft sessions stay synchronized.
 - **Leaderboard pre-computation:** Background scheduler builds the full leaderboard cache into Redis every 5 minutes; all API workers read from the same pre-computed result — no per-request aggregation.
 
 Graceful fallback: if Redis is unavailable, the app falls back to single-process in-memory state — solo development and single-worker deployments work without Redis configured.
+
+### Frontend resilience & performance
+
+**Code splitting:** All 20+ route components are loaded via `React.lazy()` + `Suspense`, reducing the initial JS bundle to only auth + shell code. Each page chunk loads on-demand with a shared loading spinner fallback.
+
+**Route-level error boundaries:** Every route is wrapped in a `RouteErrorBoundary` (React class component with `getDerivedStateFromError`). A crash in one page shows a recovery UI ("Try Again" / "Go Home") without taking down the entire app — critical for a live-scoring platform where users navigate between pages during games.
+
+**Structured error feedback:** All frontend `catch {}` blocks surface user-visible toast notifications instead of silently swallowing errors. Users always know when a network request fails.
+
+**Auto-logout on expired tokens:** The API client intercepts 401 responses, clears the stale JWT, and redirects to login — prevents infinite error loops from expired sessions.
 
 ### Client routing & mode switch
 
@@ -484,7 +508,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 
 ## Operations
 
-- **Backups:** `pg_dump`-based script inside Compose context, **retention** pruning, **cron** on the host; dumps live under the app directory (copy off-box for DR).
+- **Backups:** **AWS RDS automated backups** with 7-day retention and point-in-time recovery. On-demand `pg_dump` snapshots for migration and pre-deployment safety nets.
 - **Health:** `/api/health` for load balancers and compose healthchecks.
 - **Deploy:** pull → rebuild app image → rolling container restart; env-driven feature flags.
 - **Scheduled jobs:**
@@ -507,7 +531,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 
 ## Testing
 
-**723+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
+**787+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
@@ -518,10 +542,12 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 | **Gear triggers** | 56+ | Role-based loot filtering, gear stat eligibility (position/role restrictions for equip and drops), gear-only scoring categories, pitcher mitigation/role triggers, Mythic/Legendary thresholds, streak triggers |
 | **Gear snapshots** | 21 | Snapshot storage, reconstruction, penalty gear, compute-with-override round-trips |
 | **Bot pitcher streaming** | 37 | Multi-day spent detection, hold-aware FA filtering, gear sliding scale with personality-driven discount, budget exhaustion, aggression gating, weekly cap, sooner-start preference, Phase 2 personality gating, Late Surge scaling |
-| **Bot marketplace** | 15+ | Self-usefulness hold logic, stale listing repricing/salvage, single-bot integration, gear-aware drop protection (projection inflation, sliding gear discount, Legendary+ floor) |
+| **Bot marketplace** | 23+ | Self-usefulness hold logic, stale listing repricing/salvage, single-bot integration, gear-aware drop protection (projection inflation, sliding gear discount, Legendary+ floor), shop buying (eagerness gating, dedup, budget, rarity priority), Gear Grinder personality coverage |
 | **Trade-waiver guards** | 20+ | Overlapping proposals, chronological resolution, auto-cancellation, conflict cleanup |
 | **Research Hub** | 15+ | Leaderboard aggregation, season filtering, position filters, pagination, ownership, free agent exclusion |
 | **Live scoring** | 30+ | Accrual reconciliation, midnight boundary handling, stat corrections, Statcast enrichment |
+| **Security & hardening** | 20+ | Health endpoint info leakage, error message sanitization, per-user auto-nominate toggle (member-only access, non-member rejection), API response shape validation |
+| **Draft room Redis** | 33 | Serialization round-trips (`from_dict`/`to_redis_dict`) for all draft dataclasses, Redis save/load with mock client, `_fresh_room` fallback hierarchy, distributed lock acquire/release/non-blocking, `get_room` Redis fallback on local cache miss, `create_room`/`destroy_room` Redis lifecycle, mutation save propagation through bid route |
 | **Other** | 50+ | Auth, balance, matchup scheduling, lineup optimizer, batch projections, waiver hold visibility, transaction export, season point estimator (hitter/pitcher/TWP), integration-style API flows |
 
 ---
@@ -531,13 +557,13 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 ```yaml
 # Simplified compose topology
 services:
-  db:       # PostgreSQL 16 + healthcheck
   redis:    # Redis 7 — pub/sub + shared cache (ephemeral)
   app:      # Node build stage → Python runtime, API + static SPA
   tunnel:   # cloudflared (optional; or TLS-only reverse proxy)
+# PostgreSQL 16 on AWS RDS (managed, outside Compose)
 ```
 
-Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunicorn** fronts **Uvicorn** workers (2 workers, Redis-coordinated).
+Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunicorn** fronts **Uvicorn** workers (2 workers, Redis-coordinated). Database externalized to **AWS RDS** with `pool_pre_ping` and connection recycling for network resilience.
 
 ---
 
@@ -546,14 +572,14 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | Decision | Rationale |
 |----------|-----------|
 | **SSE vs WebSocket** | One-way push for scores, draft, and notifications; mutations stay on REST. Single SSE connection carries live scores, game updates, and instant notification events — no separate polling channels |
-| **In-memory draft** | Latency and timer accuracy; acceptable ephemeral state |
+| **Redis-backed draft state** | Authoritative `DraftRoom` serialized to Redis (JSON + distributed lock) so all Gunicorn workers share draft state — solved "Draft room not active" errors from requests hitting the wrong worker. League-ID-scoped keys isolate concurrent drafts; 4-hour TTL auto-expires abandoned rooms; graceful fallback to in-memory for single-worker / local dev |
 | **Marcel-anchored ML (5 layers)** | Industry-standard Marcel baseline (Tango/Lichtman methodology) prevents early-season volatility; ML acts as a contextual nudge rather than sole predictor — same foundation ZiPS/Steamer use, with in-season game log blending, Statcast luck correction, and quantile ranges (p10/p50/p90) for confidence intervals |
 | **39 hitter / 28 pitcher features** | Five feature categories (box-score rolling, Statcast season, matchup context, rest/fatigue, pitch-level rolling) provide strong signal without overfitting; recency-weighted training adapts to recent form; model fingerprinting prevents silent degradation on feature list changes |
 | **Role-aware reliability denominators** | Marcel regression uses raw career IP/PA with **separate denominators by role**: 400 IP for starters, **150 IP for relievers**, 1200 PA for hitters. Closers who throw 60 IP/year were getting 0.30 reliability (70% regression to league average) under the starter denominator — now a 150 IP closer gets 1.0 reliability and their elite rates are fully trusted |
 | **Greedy lineup optimizer** | Fast enough for interactive use vs. exponential exact search |
 | **JWT-gated reads** | Shrinks anonymous scraping / abuse surface at scale |
 | **Admin key for dangerous routes** | Maintenance without exposing "hidden" power endpoints |
-| **Bot personality archetypes** | 5 deterministic profiles (19 knobs each) vs. random behavior; makes AI opponents feel distinct all season |
+| **Bot personality archetypes** | 6 deterministic profiles (20 knobs each) vs. random behavior; makes AI opponents feel distinct all season — including a **Gear Grinder** that optimizes for the RPG economy loop instead of raw fantasy projections |
 | **Pitcher streaming AI** | Multi-day MLB schedule lookahead (single API call), waiver hold awareness, gear-aware sliding scale (aggression discounts gear loss), and FA-must-justify-swap comparison — mimics the most competitive human fantasy strategy with personality-driven variance |
 | **Flexible league sizes** | Commissioner-driven bot fill vs. forced 10-player roster; lowers barrier to starting a league |
 | **Gear snapshot audit trail** | Every `UserPlayerGameScore` stores `gear_snapshot_json` — the complete gear state at time of scoring. Enables post-hoc verification of any scoring discrepancy by replaying the exact modifier pipeline against persisted game stats. Snapshots copy from live accruals when available; fallback captures current equipped gear at finalization |
@@ -578,12 +604,20 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **PostgreSQL advisory locks for seeding** | `pg_advisory_lock` prevents concurrent Gunicorn workers from creating duplicate `GearTemplate` rows during startup; idempotent dedup/pruning as a safety net |
 | **Combined matchup endpoint** | Merged 2 sequential API calls (summary → detail waterfall) into a single endpoint that resolves the matchup internally and returns both summary + full player-level detail; eliminates the round-trip dependency and halves cold-load queries |
 | **Hash-based smart polling** | Lightweight scores endpoint returns an MD5 content hash alongside point totals; frontend compares hashes and only refetches the full detail when scores actually change — 90–95% of poll cycles do zero heavy DB work |
-| **Redis pub/sub for multi-worker SSE** | Single Gunicorn worker scores a game → publishes to Redis → all workers push to their SSE clients; graceful fallback to in-memory for single-worker/dev deployments |
+| **Redis pub/sub for multi-worker SSE** | Single Gunicorn worker scores a game → publishes to Redis → all workers push to their SSE clients; same pattern for draft events (bids, nominations, timer expiry); graceful fallback to in-memory for single-worker/dev deployments |
 | **Redis leaderboard pre-computation** | Research Hub leaderboard aggregates `raw_fantasy_points` across all current-season `PlayerGameLog` rows — too expensive per-request for 700+ players. Background APScheduler job rebuilds every 5 minutes into Redis; endpoints read from cache with synchronous DB fallback on miss |
 | **IL slot separation from active roster** | 2 IL slots (MAX_ROSTER = 26, ACTIVE_ROSTER_MAX = 24) let users replace injured players without dropping them. Bot personality drives IL strategy: Value Hunter stashes injured stars, Late Surge avoids injury risk near playoffs |
 | **ESPN DTD as supplemental data source** | MLB Stats API sometimes omits Day-to-Day designations. ESPN scraper fills the gap without overwriting more severe IL10/IL15/IL60 statuses — additive merge with name normalization for accent characters and team variations |
 | **Admin event gear (soulbound)** | `GearOrigin.AWARDED` items are non-salvageable and non-listable on the marketplace — soulbound rewards for historic real-world moments. Deduplication prevents double-awards; bots are excluded from distribution |
+| **AWS RDS over Docker volume** | Moved PostgreSQL from a Docker-managed volume on the same EC2 instance to AWS RDS in the same AZ. Sub-1ms latency penalty; gained automated daily backups with 7-day retention, point-in-time recovery, and crash-safe durability without manual `pg_dump` cron jobs. `pool_pre_ping` + `pool_recycle: 1800s` handle network-hop connection staleness |
+| **PyJWT over python-jose** | Migrated JWT handling from `python-jose` (unmaintained since 2022) to `PyJWT` — actively maintained, fewer dependencies, identical `encode`/`decode` API surface. Drop-in swap with aliased exception types |
+| **React.lazy code splitting** | 20+ route components loaded on-demand via `React.lazy()` + `Suspense`. Initial bundle contains only auth + app shell; heavy pages (draft room, research hub, projections) load when navigated to. Reduces first-paint blocking JS |
+| **Route-level error boundaries** | Every route wrapped in a class-based `RouteErrorBoundary` with "Try Again" / "Go Home" recovery UI. One crashing page never takes down live scoring, matchups, or other routes — critical during game time |
+| **Per-user auto-nominate** | Draft auto-nominate moved from a league-wide toggle (one person's press affected everyone) to a per-`DraftMember` flag. Each drafter controls their own AI nomination behavior independently; SSE broadcasts per-user state changes; server checks the current nominator's flag before dispatching AI |
+| **Vectorized Statcast ingestion** | Replaced `iterrows()` loops with vectorized `set_index` → `rename` → `to_dict("index")` across all 4 Statcast pipelines. `iterrows()` is notoriously slow on pandas DataFrames; vectorized path processes 700+ player rows with negligible overhead |
+| **Batch week-points derivation** | Week finalization replaced per-user point derivation (N×5 queries) with a single batch function (~5 queries total) that partitions results in-memory. Cache-aware with per-user fallback — same semantics, fraction of the DB load |
+| **Structured logging everywhere** | Replaced all `print()` debugging with Python `logging` module across email, push notifications, and trade resolution. Consistent log levels (debug/info/warning/error), structured format strings, and proper exception logging via `logger.exception()` |
 
 ---
 
-*Built with Python, TypeScript, and live MLB data. Production deployment with Docker, PostgreSQL, and Cloudflare.*
+*Built with Python, TypeScript, and live MLB data. Production deployment with Docker, AWS RDS PostgreSQL, Redis, and Cloudflare.*
