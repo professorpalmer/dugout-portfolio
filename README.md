@@ -6,6 +6,27 @@
 
 ---
 
+## TL;DR
+
+Dugout is a production fantasy baseball platform that combines RPG mechanics, real-time systems, and in-house ML. **Built entirely solo.**
+
+- **Not a toy project** — live production app with real users, deployed via Docker, AWS RDS, Redis, and Cloudflare
+- **Built entirely solo** — full ownership across ML, backend, frontend, infrastructure, and game design
+- **Novel game design problem** — RPG gear system introduces new scoring categories (e.g., holds, foul balls), addressing structural gaps in traditional fantasy baseball
+- **Autonomous bot managers** — AI-driven opponents handle drafting, trades, waivers, and lineup optimization across an entire season
+- **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90)
+- **Real-time distributed system** — Redis-backed state + SSE for live scoring, draft rooms, and event-driven notifications
+- **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), enabling 15s live updates at scale
+- **Scale signals** — 800+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
+
+### Why this exists
+
+Traditional fantasy baseball undervalues key roles (e.g., middle relievers) and lacks real-time engagement. Dugout redesigns scoring, incentives, and decision-making using ML and system design to better reflect real baseball value.
+
+See below for architecture, ML pipeline, and system design.
+
+---
+
 ## Screenshots
 
 | My Team | Live Matchup | Equipment | Shop |
