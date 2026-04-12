@@ -17,7 +17,7 @@ Dugout is a production fantasy baseball platform that combines RPG mechanics, re
 - **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90)
 - **Real-time distributed system** — Redis-backed state + SSE for live scoring, draft rooms, and event-driven notifications
 - **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), enabling 15s live updates at scale
-- **Scale signals** — 800+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
+- **Scale signals** — 837+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
 
 ### Why this exists
 
@@ -31,13 +31,13 @@ See below for architecture, ML pipeline, and system design.
 
 | My Team | Live Matchup | Equipment | Shop |
 |---------|-------------|-----------|------|
-| ![My Team](screenshots/my-team.png) | ![Matchup](screenshots/matchup-breakdown.png) | ![Equipment](screenshots/equipment.png) | ![Shop](screenshots/shop-detail.png) |
+| ![My Team](screenshots/my-team.png) | ![Matchup](screenshots/matchup-breakdown.png) | ![Equipment](screenshots/equipment.png) | ![Shop](screenshots/shop.png) |
 
-| Research Leaderboard | Free Agents | Player Compare |
-|---------------------|-------------|----------------|
-| ![Leaderboard](screenshots/research-leaderboard.png) | ![Free Agents](screenshots/research-free-agents.png) | ![Compare](screenshots/research-compare.png) |
+| Profile & Badges | Research Leaderboard | Free Agents | Player Compare |
+|-----------------|---------------------|-------------|----------------|
+| ![Profile](screenshots/profile.png) | ![Leaderboard](screenshots/research-leaderboard.png) | ![Free Agents](screenshots/research-free-agents.png) | ![Compare](screenshots/research-compare.png) |
 
-**[View all 27 screenshots →](SCREENSHOTS.md)** — landing, live scores, box scores, matchups, scoring breakdowns, league standings, gear locker, shop, catalogue, waivers, trades, projections, lineup optimizer, research hub, leaderboard, free agents, player compare, player deep-dive, team profiles, notifications, and more.
+**[View all 28 screenshots →](SCREENSHOTS.md)** — landing, live scores, box scores, matchups, scoring breakdowns, league standings, gear locker, shop, catalogue, waivers, trades, projections, lineup optimizer, research hub, leaderboard, free agents, player compare, player deep-dive, team profiles, user profiles, notifications, and more.
 
 ---
 
@@ -61,6 +61,8 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **Gear catalogue** tracks collection progress across all ~200 items with challenge conditions and rarity-grouped browsing.
 - **Precision gear display** — every gear card shows the true effective boost after diminishing returns, not raw template values. Two-decimal precision across all surfaces (trophy case, locker, shop, catalogue, detail modals).
 - **Slot occupancy indicators** in the Move Position menu — open slots highlighted green, occupied slots dimmed with the current player's name — so lineup decisions never require scrolling.
+- **User profiles** with avatar upload (2MB max, JPEG/PNG/WebP, content-hash filenames, Docker volume persistence), username-based shareable routes (`/profile/:username`), career stats (all-time W-L, total points, seasons played), and active league cards.
+- **Achievement badges** — auto-awarded at season end (champion, runner-up, third place, first season completed) with SVG icons and gradient theming by badge type. Admin-grantable special badges for milestones. Batch `IN` query for first-season dedup (no N+1).
 - **Transaction export** — downloadable Excel (.xlsx) of all league transactions with league isolation and batch queries.
 - **In-app guide** (10-section How to Play), **FAQ/Trust page**, **contact/status pages**, and **privacy/terms** — all built as first-class React views.
 
@@ -556,7 +558,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 
 ## Testing
 
-**802+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
+**837+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
@@ -573,6 +575,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 | **Live scoring** | 30+ | Accrual reconciliation, midnight boundary handling, stat corrections, Statcast enrichment |
 | **Security & hardening** | 20+ | Health endpoint info leakage, error message sanitization, per-user auto-nominate toggle (member-only access, non-member rejection), API response shape validation |
 | **Draft room Redis** | 48 | Serialization round-trips (`from_dict`/`to_redis_dict`) for all draft dataclasses, Redis save/load with mock client, `_fresh_room` fallback hierarchy, distributed lock acquire/release/non-blocking, `get_room` Redis fallback on local cache miss, `create_room`/`destroy_room` Redis lifecycle, mutation save propagation through bid route, **lobby feature** (lobby/ready_members serialization round-trips, backwards-compat for pre-lobby rooms, create_room auto-readies bots, `POST /draft/ready` marks user + rejects after lobby ends, `POST /draft/begin` transitions to active + commissioner-only + force-start, `start_draft` no longer fires nomination) |
+| **User profiles & badges** | 17 | UserBadge model CRUD, profile API (full data return, 404 handling, batch league loading, empty state), avatar upload (valid JPEG, oversized rejection, bad content type, auth required, 404 serve, old avatar cleanup on re-upload), badge awarding (season-end creation, first_season dedup, mode labels), User model new fields |
 | **Other** | 50+ | Auth, balance, matchup scheduling, lineup optimizer, batch projections, waiver hold visibility, transaction export, season point estimator (hitter/pitcher/TWP), integration-style API flows |
 
 ---
@@ -646,6 +649,8 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Non-blocking draft won-toast** | Replaced a full-screen "Player won" overlay (blocked the entire draft UI for 1–2s) with a slide-in toast that appears at the top edge and auto-dismisses. Users can continue watching bids, especially on mobile where screen real estate is scarce |
 | **Pitcher designation sub-filter** | Research Hub Leaderboard and Free Agents views surface a secondary pill bar when position = P, filtering by `PitcherRole` (SP/CL/SU/MR/SW). Backend passes `pitcher_role` through to the Redis-cached leaderboard query; frontend conditionally renders the sub-filter row. Reuses the same classification already powering gear restrictions |
 | **Redis connection singleton** | Draft room Redis calls originally created a fresh `redis.from_url()` connection per invocation (25–75ms TCP overhead per bid). Replaced with a module-level `_redis_client` singleton initialized once on first use. Near-zero per-request overhead; bid-to-register latency dropped from ~50ms to <5ms on the Redis path |
+| **User profiles with avatar uploads** | File-based avatar storage on a Docker volume (`/data/avatars`) with content-hash filenames, content-type validation (JPEG/PNG/WebP, 2MB max), and `FileResponse` with `Cache-Control` headers. Username-based routes (`/profile/:username`) make profiles shareable. Old avatars are automatically cleaned up on re-upload to prevent disk growth |
+| **Achievement badge system** | `UserBadge` model with type-based SVG rendering and gradient theming. Badges auto-awarded at season end (champion, runner-up, third, first season) inside the existing `auto_advance_leagues` transaction. First-season dedup uses a batch `IN` query to avoid N+1 across all league participants |
 
 ---
 

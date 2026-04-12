@@ -84,6 +84,14 @@ All screenshots from the live production app (mobile PWA).
 
 ---
 
+## User Profiles & Badges
+
+| Profile (avatar, badges, career stats, leagues) |
+|--------------------------------------------------|
+| ![Profile](screenshots/profile.png) |
+
+---
+
 ## Settings & Info
 
 | Push Notifications | How to Play Guide |
