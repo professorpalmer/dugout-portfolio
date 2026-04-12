@@ -301,7 +301,7 @@ Standard projection systems (Marcel, ZiPS, Steamer) handle pitcher role changes 
 
 - **Asymmetric conversion factors:** RP-to-SP is empirically harder than SP-to-RP. Base factors reflect this (ERA: 1.20 vs 0.85, K/9: 0.88 vs 1.10). No projection system we're aware of models this asymmetry at the pitch level.
 - **Tiered data-quality noise guard:** Strong pitch profiles (200+ pitches both sides with velo data) get ±15% adjustment range with full damping; weak profiles get ±4% with halved damping. Prevents wrong-direction nudges from thin data while allowing full-strength adjustments for well-sampled pitchers.
-- **Logistic ip_factor fade:** Dugout refinement peaks at 60-120 IP in the target role (the sweet spot where role-change projection matters most), then fades via a logistic curve as box-score data accumulates and speaks for itself.
+- **Logistic ip_factor fade:** Gentle logistic fade (midpoint=300 IP) keeps pitch-level signals active across all practical sample sizes. Unlike aggregate stats, pitch-level mechanics (velo shifts, arsenal compression, fatigue curves) remain informative even with large box-score samples.
 - **Correlated Monte Carlo:** Within-game events (K, ER, H, BB) are sampled via a Gaussian copula preserving realistic correlations (K↔H: -0.35, H↔ER: +0.65) instead of independent Poisson draws.
 - **N+1-free batch loading:** `load_all_pitchers()` uses 3 batch queries instead of 2N+1 per-pitcher queries for scale.
 
