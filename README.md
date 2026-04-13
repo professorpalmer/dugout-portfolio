@@ -29,9 +29,9 @@ See below for architecture, ML pipeline, and system design.
 
 ## Screenshots
 
-| My Team | Live Matchup | Equipment | Shop |
-|---------|-------------|-----------|------|
-| ![My Team](screenshots/my-team.png) | ![Matchup](screenshots/matchup-breakdown.png) | ![Equipment](screenshots/equipment.png) | ![Shop](screenshots/shop.png) |
+| My Team | Matchup Breakdown | Equipment | Shop |
+|---------|-------------------|-----------|------|
+| ![My Team](screenshots/my-team.png) | ![Matchup Breakdown](screenshots/matchup-breakdown.png) | ![Equipment](screenshots/equipment.png) | ![Shop](screenshots/shop.png) |
 
 | Profile & Badges | Research Leaderboard | Free Agents | Player Compare |
 |-----------------|---------------------|-------------|----------------|

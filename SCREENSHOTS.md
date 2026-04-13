@@ -24,9 +24,9 @@ All screenshots from the live production app (mobile PWA).
 |-------------|-----------------|
 | ![Live Scores](screenshots/live-scores.png) | ![Box Score](screenshots/live-boxscore.png) |
 
-| Weekly Matchup | Scoring Breakdown |
-|----------------|-------------------|
-| ![Matchup](screenshots/matchup.png) | ![Breakdown](screenshots/matchup-breakdown.png) |
+| League Scoreboard | Matchup Breakdown |
+|-------------------|-------------------|
+| ![League Scoreboard](screenshots/matchup.png) | ![Matchup Breakdown](screenshots/matchup-breakdown.png) |
 
 ---
 
