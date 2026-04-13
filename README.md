@@ -10,15 +10,14 @@
 
 Dugout is a production fantasy baseball platform that combines RPG mechanics, real-time systems, and in-house ML. **Built entirely solo.**
 
-- **Not a toy project** — live production app with real users, deployed via Docker, AWS RDS, Redis, and Cloudflare
+- **Live production system** — deployed via Docker, AWS RDS PostgreSQL, Redis, and Cloudflare with real users and active seasons
 - **Built entirely solo** — full ownership across ML, backend, frontend, infrastructure, and game design
 - **Novel game design problem** — RPG gear system introduces new scoring categories (e.g., holds, foul balls), addressing structural gaps in traditional fantasy baseball
 - **Autonomous bot managers** — AI-driven opponents handle drafting, trades, waivers, and lineup optimization across an entire season
-- **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90)
-- **Pitch-level pitcher projections** — the Dugout Method: pitcher-specific role-shift conversions using Statcast pitch-mix, velocity, and fatigue data instead of flat industry constants, validated via correlated Monte Carlo simulation
+- **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90); independent pitch-level role-transition research (rigorous negative result across 89 comparisons)
 - **Real-time distributed system** — Redis-backed state + SSE for live scoring, draft rooms, and event-driven notifications
 - **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), enabling 15s live updates at scale
-- **Scale signals** — 1,030+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
+- **Scale signals** — 1,100+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
 
 ### Why this exists
 
@@ -285,29 +284,19 @@ Real-time **bid / let-go** recommendations during the auction:
 
 Product messaging: **in-house statistical ML**, not generative AI.
 
-### 6. Pitcher role-shift projections — the Dugout Method
+### 6. Pitcher role-transition research (sandbox)
 
-Standard projection systems (Marcel, ZiPS, Steamer) handle pitcher role changes with flat conversion factors — a reliever converting to the rotation gets the same ERA multiplier regardless of whether his fastball gains 3 mph or stays flat. The Dugout Method replaces flat factors with **pitcher-specific, data-driven conversion** derived from pitch-level Statcast data. Fully sandboxed (zero imports from live service code, read-only DB access, isolated dataclasses).
+Independent research module (`dugout/sandbox/`) investigating whether **pitch-level Statcast data** could beat flat league-average conversion factors for projecting SP↔RP transitions. Built a full pipeline from scratch: 50+ pitcher registry, Statcast scraper (447 parquet files, 2015-2025), pitch-by-pitch arsenal decomposition, structural role-transition features, and a cross-validated backtest with statistical significance testing.
 
-**Pipeline:** Temporal role segmentation (sliding-window majority vote over appearances) → stat-specific recency-weighted decomposition (K/9 half-life=20 games, BB/9=25, ERA=30, H/9=40) → role-aware Marcel baseline blending → pitch-level Dugout conversion → correlated Monte Carlo simulation (1,000 game lines via Gaussian copula) → temporal holdout validation with calibration metrics.
+**What was tested:**
+- Bottom-up stat prediction (K/PA, BB/PA, xwOBA) from per-pitch-type outcome models
+- Velocity/spin/movement deltas between roles
+- Third-time-through-order penalty, pitch sequencing entropy, fatigue resilience curves, platoon exposure shifts
+- Three architectural iterations (raw replacement, modulation, structural signal modulation)
 
-**Three pitch-level signals replace flat constants:**
+**Result: negative.** Across 89 cross-validated comparisons on 50+ pitchers, none of the three architectures produced statistically significant improvement over flat conversion factors (all p > 0.05, Cohen's d < 0.2). The per-pitcher signal exists for specific arms but is drowned by game-to-game scoring noise at the population level.
 
-1. **Pitch-mix shift analysis** — per-pitch-type whiff rate, CSW rate, chase rate, and contact quality (Statcast barrel zone definition) decomposed by role. Arsenal compression score measures how aggressively a pitcher narrows to their best stuff in the new role.
-2. **Velocity/spin translation model** — fastball/slider velo and spin deltas between roles, compared against the MLB-average SP-to-RP velo bump (+1.5 mph). Pitchers who gain more velocity in relief translate better.
-3. **Fatigue curve → IP distribution** — velocity drop from innings 1-3 to 5+ directly shapes the Monte Carlo IP distribution. High-fatigue starters get shorter, more variable simulated outings.
-
-**Key design decisions:**
-
-- **Asymmetric conversion factors:** RP-to-SP is empirically harder than SP-to-RP. Base factors reflect this (ERA: 1.20 vs 0.85, K/9: 0.88 vs 1.10). No projection system we're aware of models this asymmetry at the pitch level.
-- **Tiered data-quality noise guard:** Strong pitch profiles (200+ pitches both sides with velo data) get ±15% adjustment range with full damping; weak profiles get ±4% with halved damping. Prevents wrong-direction nudges from thin data while allowing full-strength adjustments for well-sampled pitchers.
-- **Logistic ip_factor fade:** Gentle logistic fade (midpoint=300 IP) keeps pitch-level signals active across all practical sample sizes. Unlike aggregate stats, pitch-level mechanics (velo shifts, arsenal compression, fatigue curves) remain informative even with large box-score samples.
-- **Correlated Monte Carlo:** Within-game events (K, ER, H, BB) are sampled via a Gaussian copula preserving realistic correlations (K↔H: -0.35, H↔ER: +0.65) instead of independent Poisson draws.
-- **N+1-free batch loading:** `load_all_pitchers()` uses 3 batch queries instead of 2N+1 per-pitcher queries for scale.
-
-**Validation:** Temporal holdout backtest across 13 pitchers with confirmed role changes (50 comparisons at 3 holdout points each). Fixture data sourced from both the production DB and MLB Stats API for full career coverage.
-
-**186 sandbox tests** across 9 test files covering role detection, decomposition, projection blending, noise guard tiers, same-role bypass, Monte Carlo correlation, fatigue adjustment, scoring, calibration, data loading, and model properties.
+**Why it's here:** A rigorous negative result is still a result. The research demonstrates the full pipeline — data engineering, feature extraction, model architecture, cross-validation with significance testing — and the discipline to measure honestly and stop when the data says stop. The infrastructure (registry, scraper, validation harness, 256 tests) is preserved for future approaches.
 
 ---
 
@@ -554,12 +543,7 @@ With the right gear equipped, a reliever earning holds suddenly generates real f
 - **Batter:** max exit velo, barrel rate per PA, whiff rate, hard-hit rate
 - **Pitcher:** avg pitch speed, whiff rate, called-strike percentage
 
-**Pitch-level Statcast** (scraped per-pitcher via pybaseball, stored as parquet):
-- Per-pitch: velocity, spin rate, movement, pitch type, zone, description (whiff/foul/hit), launch speed/angle
-- Aggregated into **role-specific pitch profiles** for the Dugout Method: per-pitch-type whiff rate, CSW rate, chase rate, contact quality (barrel zone definition), and arsenal compression scores
-- **Velocity/spin deltas** between starter and reliever appearances feed fatigue curves and role-shift conversion models
-
-Statcast data feeds into projections (15 hitter / 14 pitcher features), the Dugout Method pitcher role-shift pipeline (pitch-mix decomposition, velo modeling, fatigue curves), the Research Hub player deep-dive UI (as interactive "Statcast chips"), gear trigger conditions, and team-level opposing-lineup quality aggregates.
+Statcast data feeds into projections (15 hitter / 14 pitcher features), the Research Hub player deep-dive UI (as interactive "Statcast chips"), gear trigger conditions, and team-level opposing-lineup quality aggregates.
 
 ---
 
@@ -588,7 +572,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Dugo
 
 ## Testing
 
-**1,030+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
+**1,100+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
@@ -606,7 +590,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Dugo
 | **Security & hardening** | 20+ | Health endpoint info leakage, error message sanitization, per-user auto-nominate toggle (member-only access, non-member rejection), API response shape validation |
 | **Draft room Redis** | 48 | Serialization round-trips (`from_dict`/`to_redis_dict`) for all draft dataclasses, Redis save/load with mock client, `_fresh_room` fallback hierarchy, distributed lock acquire/release/non-blocking, `get_room` Redis fallback on local cache miss, `create_room`/`destroy_room` Redis lifecycle, mutation save propagation through bid route, **lobby feature** (lobby/ready_members serialization round-trips, backwards-compat for pre-lobby rooms, create_room auto-readies bots, `POST /draft/ready` marks user + rejects after lobby ends, `POST /draft/begin` transitions to active + commissioner-only + force-start, `start_draft` no longer fires nomination) |
 | **User profiles & badges** | 17 | UserBadge model CRUD, profile API (full data return, 404 handling, batch league loading, empty state), avatar upload (valid JPEG, oversized rejection, bad content type, auth required, 404 serve, old avatar cleanup on re-upload), badge awarding (season-end creation, first_season dedup, mode labels), User model new fields |
-| **Dugout Method sandbox** | 186 | Projector blending (tiered noise guard, ip_factor, clamps, same-role bypass, fallback cascade, lerp, small-sample augment), simulator (Monte Carlo correlation, fatigue curves, IP distribution, scoring), decomposer (recency half-lives, role segmentation), pitch profile (barrel zone, pitch-mix shift, contact quality), velo model (delta calculation, fatigue curves), validator (score_game, calibration, ValidationResult), data loader (JSON round-trip, missing fields, Statcast), models (GameLine properties, RoleSegment, PitchMixProfile) |
+| **Sandbox (pitcher research)** | 256 | Role detection, decomposition, projection, simulation, pitch profiles, velo models, signal models, structural signals (TTO/entropy/fatigue/platoon), validation, data loading, models, registry |
 | **Other** | 50+ | Auth, balance, matchup scheduling, lineup optimizer, batch projections, waiver hold visibility, transaction export, season point estimator (hitter/pitcher/TWP), integration-style API flows |
 
 ---
@@ -635,8 +619,6 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Marcel-anchored ML (5 layers)** | Industry-standard Marcel baseline (Tango/Lichtman methodology) prevents early-season volatility; ML acts as a contextual nudge rather than sole predictor — same foundation ZiPS/Steamer use, with in-season game log blending, Statcast luck correction, and quantile ranges (p10/p50/p90) for confidence intervals |
 | **39 hitter / 28 pitcher features** | Five feature categories (box-score rolling, Statcast season, matchup context, rest/fatigue, pitch-level rolling) provide strong signal without overfitting; recency-weighted training adapts to recent form; model fingerprinting prevents silent degradation on feature list changes |
 | **Role-aware reliability denominators** | Marcel regression uses raw career IP/PA with **separate denominators by role**: 400 IP for starters, **150 IP for relievers**, 1200 PA for hitters. Closers who throw 60 IP/year were getting 0.30 reliability (70% regression to league average) under the starter denominator — now a 150 IP closer gets 1.0 reliability and their elite rates are fully trusted |
-| **Pitch-level role-shift projections** | Flat RP↔SP conversion factors (industry standard) ignore pitcher-specific mechanics. The Dugout Method uses per-pitcher Statcast data (pitch-mix shifts, velo/spin deltas, fatigue curves) with asymmetric conversion factors and tiered data-quality noise guards. Fully sandboxed — zero imports from live code, read-only DB, separate dataclasses — so development and validation can't affect production |
-| **Correlated Monte Carlo simulation** | Independent Poisson draws produce unrealistic game lines (high-K + high-H). Gaussian copula preserves empirical stat correlations (K↔H: −0.35, H↔ER: +0.65) across 1,000 simulated appearances per pitcher, yielding realistic IP/K/ER/H/BB distributions for holdout validation |
 | **Greedy lineup optimizer** | Fast enough for interactive use vs. exponential exact search |
 | **JWT-gated reads** | Shrinks anonymous scraping / abuse surface at scale |
 | **Admin key for dangerous routes** | Maintenance without exposing "hidden" power endpoints |
