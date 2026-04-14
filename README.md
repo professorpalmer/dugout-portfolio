@@ -17,7 +17,7 @@ Dugout is a production fantasy baseball platform that combines RPG mechanics, re
 - **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90); independent pitch-level role-transition research (rigorous negative result across 89 comparisons)
 - **Real-time distributed system** — Redis-backed state + SSE for live scoring, draft rooms, and event-driven notifications
 - **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), enabling 15s live updates at scale
-- **Scale signals** — 1,100+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
+- **Scale signals** — 1,250+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
 
 ### Why this exists
 
@@ -54,6 +54,7 @@ Dugout layers **RPG progression** on head-to-head fantasy baseball:
 - **Live scoring** with 15-second box score polling, in-game fantasy point accrual with **gear snapshot freezing**, and **live box scores** with real-time current-batter highlighting (MLB ID matching via linescore API). **Merge-based frontend updates** — game state diffs are compared field-by-field so the UI only re-renders when data actually changes (no poll-cycle flicker). Yesterday's finals are auto-evicted from the live page once today's first pitch is thrown.
 - **Event-driven notifications** — SSE-pushed instant alerts for every stat event (hits, walks, HRs, Ks, etc.) delivered faster than ESPN or Yahoo. Two-tier system (Highlights + Play-by-Play) with per-user granularity toggles. Web Push (VAPID) for OS-level notifications.
 - **Play-by-play enrichment** — fielding credits (OF catches, double plays), ABS challenge tracking, trailing/go-ahead HR detection, foul ball counting from Statcast.
+- **Automated callup detection** — multi-source pipeline (RSS feed NLP, MLB transactions API, nightly roster diffs, admin manual override) detects minor-league callups faster than the official API, auto-promotes players to the waiver wire, and pushes real-time notifications. Speculation filter prevents acting on rumors.
 - **Unified transactions** for waivers and trades; bots participate in both — including **bot-to-bot trades** — with personality-driven decision making and season-phase-aware trade throttling.
 - **Research Hub** — a multi-tab player intelligence center (Search, Leaderboard, Free Agents, Compare) with Redis-cached rankings, position filtering, **pitcher designation sub-filters** (SP/CL/SU/MR/SW), waiver hold badges, and side-by-side player comparison. **Team profiles** show any team's full roster, trophy case, and gear loadout.
 - **Marcel-anchored ML projections** (p10/p50/p90 ranges) with a 5-layer architecture: Marcel multi-year baseline → in-season blend → Statcast luck correction → gradient-boosted context adjustment (**39 hitter / 28 pitcher features**) → range construction. Recency-weighted training, pitch-level rolling stats, opposing-lineup quality, rest/fatigue modeling, and L/R platoon splits. Dedicated **Projections page** with animated pipeline progress, per-player confidence bars, matchup context, and Statcast chips.
@@ -158,7 +159,7 @@ Multi-layer security posture for a public-facing app with real users:
 | **Cache/PubSub** | Redis 7 — cross-worker SSE broadcast (pub/sub), shared game cache, derived scoring TTL cache, **leaderboard pre-computation cache**, **distributed draft room state** |
 | **ML** | scikit-learn (`HistGradientBoostingRegressor`, GMM), NumPy, pandas, joblib |
 | **Real-time** | SSE (`sse-starlette`) — draft room, live scores, and **event-driven notifications**; Web Push (VAPID) for OS-level alerts |
-| **Data** | MLB Stats API (rosters, depth charts, game logs, play-by-play, transactions), Statcast (pybaseball), **ESPN DTD injury scraper** |
+| **Data** | MLB Stats API (rosters, depth charts, game logs, play-by-play, transactions), Statcast (pybaseball), **ESPN DTD injury scraper**, **RSS callup watcher** (MLB Trade Rumors, ESPN — feedparser + NLP speculation filter) |
 | **Auth** | JWT + bcrypt, email verification + password reset (Resend) |
 | **Infra** | AWS EC2 + **RDS PostgreSQL** (7-day automated backups, point-in-time recovery), Multi-stage Docker image, Cloudflare Tunnel |
 
@@ -420,6 +421,48 @@ Clickable matchup history rows expand inline to show the full player-by-player s
 
 Every 15 minutes: poll MLB transactions API for injuries, DFA, trades, activations. Auto-updates player `injury_status` and pushes notifications to roster owners ("Justin Verlander placed on 15-day IL"). **ESPN DTD scraper** supplements the MLB API with Day-to-Day designations that the official feed sometimes omits.
 
+### Callup detection & waiver wire automation
+
+Three-vector system that detects minor-league callups faster than the MLB Stats API's official roster designation changes, automatically promoting players to the waiver wire and notifying users via push notification:
+
+**Problem:** When a top prospect gets called up, the MLB API's `rosterType` often lags behind beat reporters by hours. Fantasy managers on ESPN/Yahoo who hear the news first gain a massive waiver advantage. Dugout closes this gap with a multi-source detection pipeline.
+
+**Architecture:**
+
+```
+┌──────────────────────────┐
+│  Vector 1: RSS Watcher   │  ← MLB Trade Rumors, ESPN (15 min)
+│  feedparser + NLP filter  │
+├──────────────────────────┤
+│  Vector 2: Transactions  │  ← MLB Stats API transactions (15 min)
+│  poll_transactions()      │
+├──────────────────────────┤
+│  Vector 3: Roster Sync   │  ← 40-man roster diff (nightly 5 AM ET)
+│  sync_all_players()       │
+├──────────────────────────┤
+│  Vector 4: Admin Manual  │  ← POST /admin/promote-player
+│  Beat reporter → admin    │
+└────────────┬─────────────┘
+             ▼
+┌──────────────────────────┐
+│  Player.is_minor_league  │  ← flips False → available on waivers
+│  Push notification       │  ← "Callup: Noah Schultz (P, CWS)"
+│  SSE broadcast           │  ← real-time UI update
+└──────────────────────────┘
+```
+
+**RSS callup watcher (`callup_watcher.py`):** Parses RSS feeds from MLB Trade Rumors and ESPN every 15 minutes. Three-stage pipeline:
+
+1. **Keyword classification:** Regex patterns identify callup, option, or irrelevant articles from headlines and summaries. Covers 15+ phrasings ("called up", "promoted", "recalled", "selected to roster", "added to active roster", "contract purchased", "designated for assignment", "optioned", "sent to minors", etc.).
+
+2. **Speculation filter:** Prevents false positives from rumor articles. `_SPECULATION_PATTERNS` detect phrases like "expected to", "likely to", "rumored", "could be"; `_CONFIRMED_PATTERNS` detect definitive language ("have promoted", "officially", "announced"). Standalone past-tense verbs ("recalled", "promoted") use negative lookaheads to avoid matching speculative frames ("likely to be recalled"). If speculation is detected without a confirming override, the article is skipped.
+
+3. **DB-scan player identification:** Primary strategy pre-indexes all known minor-league player names (Unicode-normalized for accents/suffixes via `unicodedata.normalize('NFD')`) and scans article text for matches using word-boundary regex. Handles Latin names (José Ramírez → jose ramirez), suffixes (Jr., III), and arbitrary phrasing. Falls back to regex-based name extraction from headlines when the DB scan finds no matches.
+
+**`is_minor_league` flag:** Boolean on the `Player` model. Set during 40-man roster seeding (players with MLB status codes like "MIN", "NRI" are flagged). Filtered from all player-facing queries — draft pool, waiver wire, research leaderboard, free agents, bot transactions, player search — so minor leaguers never appear until promoted.
+
+**Notification pipeline:** All four detection vectors feed into the same notification path — SSE broadcast for real-time UI updates, plus per-user push notifications (Web Push / VAPID) with a dedicated `callups` preference toggle independent from the general MLB news toggle. Deep-links to `/waivers` so users can claim immediately.
+
 ### Performance engineering
 
 Full-app audit across **16 backend files** (11 API routes + 5 background services) eliminated **29+ N+1 query patterns** by replacing per-item `session.get()` calls inside loops with batch `WHERE id IN (...)` queries and dict lookups.
@@ -567,12 +610,13 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 | Game reminders | Every 15 min | Smart daily alert when roster players' games are about to start; deduped to one per user per day |
 | MLB transactions | Every 15 min | Injury/DFA/trade updates, pushes to roster owners |
 | ESPN DTD scraper | Every 15 min | Supplemental Day-to-Day injury data from ESPN |
+| RSS callup watcher | Every 15 min | Poll MLB Trade Rumors + ESPN RSS for callup/option articles; NLP speculation filter; DB-scan name matching; auto-promote to waiver wire |
 
 ---
 
 ## Testing
 
-**1,100+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
+**1,250+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
@@ -584,6 +628,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 | **Gear snapshots** | 21 | Snapshot storage, reconstruction, penalty gear, compute-with-override round-trips |
 | **Bot pitcher streaming** | 37 | Multi-day spent detection, hold-aware FA filtering, gear sliding scale with personality-driven discount, budget exhaustion, aggression gating, weekly cap, sooner-start preference, Phase 2 personality gating, Late Surge scaling |
 | **Bot marketplace** | 23+ | Self-usefulness hold logic, stale listing repricing/salvage, single-bot integration, gear-aware drop protection (projection inflation, sliding gear discount, Legendary+ floor), shop buying (eagerness gating, dedup, budget, rarity priority), Gear Grinder personality coverage |
+| **Callup watcher** | 79 | RSS keyword classification, speculation filter (rumor vs. confirmed language), DB-scan name matching (Unicode normalization, accents, suffixes), callup/option detection, GUID deduplication, minor-league flag lifecycle, admin promote endpoint, nightly roster sync diffs |
 | **Trade-waiver guards** | 20+ | Overlapping proposals, chronological resolution, auto-cancellation, conflict cleanup |
 | **Research Hub** | 15+ | Leaderboard aggregation, season filtering, position filters, pagination, ownership, free agent exclusion |
 | **Live scoring** | 30+ | Accrual reconciliation, midnight boundary handling, stat corrections, Statcast enrichment |
@@ -651,6 +696,7 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Redis leaderboard pre-computation** | Research Hub leaderboard aggregates `raw_fantasy_points` across all current-season `PlayerGameLog` rows — too expensive per-request for 700+ players. Background APScheduler job rebuilds every 5 minutes into Redis; endpoints read from cache with synchronous DB fallback on miss |
 | **IL slot separation from active roster** | 2 IL slots (MAX_ROSTER = 26, ACTIVE_ROSTER_MAX = 24) let users replace injured players without dropping them. Bot personality drives IL strategy: Value Hunter stashes injured stars, Late Surge avoids injury risk near playoffs |
 | **ESPN DTD as supplemental data source** | MLB Stats API sometimes omits Day-to-Day designations. ESPN scraper fills the gap without overwriting more severe IL10/IL15/IL60 statuses — additive merge with name normalization for accent characters and team variations |
+| **Multi-vector callup detection** | Four independent detection paths (RSS NLP, MLB transactions, nightly roster diff, admin manual) converge on the same `is_minor_league` flag flip + notification pipeline. RSS watcher uses a three-stage pipeline: keyword classification → speculation filter (prevents acting on "expected to" / "rumored" language) → DB-scan name matching with Unicode normalization for accented names. Redundancy ensures no callup is missed; speculation filter ensures no rumor triggers a false promotion. 79 dedicated tests covering keyword/speculation/name-matching edge cases |
 | **Admin event gear (soulbound)** | `GearOrigin.AWARDED` items are non-salvageable and non-listable on the marketplace — soulbound rewards for historic real-world moments. Deduplication prevents double-awards; bots are excluded from distribution |
 | **AWS RDS over Docker volume** | Moved PostgreSQL from a Docker-managed volume on the same EC2 instance to AWS RDS in the same AZ. Sub-1ms latency penalty; gained automated daily backups with 7-day retention, point-in-time recovery, and crash-safe durability without manual `pg_dump` cron jobs. `pool_pre_ping` + `pool_recycle: 1800s` handle network-hop connection staleness |
 | **PyJWT over python-jose** | Migrated JWT handling from `python-jose` (unmaintained since 2022) to `PyJWT` — actively maintained, fewer dependencies, identical `encode`/`decode` API surface. Drop-in swap with aliased exception types |
