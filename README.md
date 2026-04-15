@@ -17,7 +17,7 @@ Dugout is a production fantasy baseball platform that combines RPG mechanics, re
 - **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90); independent pitch-level role-transition research (rigorous negative result across 89 comparisons)
 - **Real-time distributed system** — Redis-backed state + SSE for live scoring, draft rooms, and event-driven notifications
 - **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), enabling 15s live updates at scale
-- **Scale signals** — 1,300+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
+- **Scale signals** — 1,314+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
 
 ### Why this exists
 
@@ -542,6 +542,8 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 
 **Mythic items** (0.5% base weight): Babe Ruth's Called Shot Bat (490+ ft HR), Billy Hamilton's 1890 Cleats (4+ SB), Jeter's Flip Glove (SS, 5+ assists in a win), Gibson's 1968 Visor (8+ IP, 0 ER, 10+ K), and more. **Event-awarded gear** can be admin-granted for historic real-world moments (soulbound, non-tradeable, non-salvageable).
 
+**Immutable loot provenance (`GearLootHistory`):** An append-only audit table records every loot drop per user/player/league/season. Challenge progress and "already earned" checks query this immutable history instead of live `GearInstance` rows — salvaging, selling, or trading gear never resets a player's completed challenges. Per-user/per-player scoping means trading a player gives the new owner a fresh challenge slate (0/N), while re-acquiring the player restores the original owner's full history. Purchased/shop gear never writes to the history table, so marketplace purchases don't block future loot drops.
+
 ### Anti-snowball mechanics
 
 - **60% positive boost cap** per player; penalties uncapped (risk stays real)
@@ -550,6 +552,7 @@ Dashboard **`Outlet`** is **keyed** on active fantasy team / league so **Switch 
 - **Season rarity ceiling:** days 0–14 max Rare; 14–42 max Epic; 42–70 max Legendary; 70+ Mythic unlocked
 - **Diminishing daily drops:** 1st drop today = 100%, 2nd = 50%, 3rd = 25%, 4th+ = 10%
 - **Daily-use gear lock:** prevents swapping gear between players on the same calendar day
+- **Immutable loot provenance:** challenge progress persists through salvage, trade, and marketplace sale via an append-only audit table — prevents earn/salvage/re-earn exploit loops while giving new owners a clean slate
 - **Soulbound loot** from performance; marketplace-only circulation for purchased gear; inverse tier drop bias for bench players
 - **Gear-only scoring categories** (foul balls, holds, innings pitched) — base weight is 0.0 but specific equipment activates the category, creating unique value for gear without inflating baseline scoring. Multiple pieces targeting the same created category **stack additively**, rewarding all-in builds. Includes **mitigation gear** that absorbs a percentage of negative stat penalties (e.g., ER, losses)
 
@@ -620,7 +623,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 
 ## Testing
 
-**1,300+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
+**1,314+ automated tests** (pytest) against SQLite fixtures. Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
@@ -717,6 +720,7 @@ Multi-stage **Dockerfile**: build frontend, copy `dist` into API image; **Gunico
 | **Redis connection singleton** | Draft room Redis calls originally created a fresh `redis.from_url()` connection per invocation (25–75ms TCP overhead per bid). Replaced with a module-level `_redis_client` singleton initialized once on first use. Near-zero per-request overhead; bid-to-register latency dropped from ~50ms to <5ms on the Redis path |
 | **User profiles with avatar uploads** | File-based avatar storage on a Docker volume (`/data/avatars`) with content-hash filenames, content-type validation (JPEG/PNG/WebP, 2MB max), and `FileResponse` with `Cache-Control` headers. Username-based routes (`/profile/:username`) make profiles shareable. Old avatars are automatically cleaned up on re-upload to prevent disk growth |
 | **Achievement badge system** | `UserBadge` model with type-based SVG rendering and gradient theming. Badges auto-awarded at season end (champion, runner-up, third, first season) inside the existing `auto_advance_leagues` transaction. First-season dedup uses a batch `IN` query to avoid N+1 across all league participants |
+| **`GearLootHistory` audit table** | Append-only record of every loot drop per user/player/league/season. Survives salvage, trade, and marketplace sale — challenge progress and "already earned" checks query this immutable table instead of live `GearInstance` rows. Per-user/per-player scoping means trading a player gives the new owner a fresh 0/N challenge slate while the original owner's history persists on re-acquisition. Purchased gear never writes to the history table, so marketplace purchases don't block future loot drops. Savepoint-based idempotent writes handle retry safety |
 
 ---
 
