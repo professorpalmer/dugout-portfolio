@@ -88,8 +88,8 @@ Multi-layer security posture for a public-facing app with real users:
 | Control | Implementation |
 |---------|----------------|
 | **Password hashing** | **argon2id** via `argon2-cffi` with OWASP-recommended params (memory-hard, GPU-resistant). Existing bcrypt hashes are **lazily rehashed to argon2id on successful login** — zero forced resets during migration |
-| **JWT access tokens** | HS256 via `PyJWT`, **15-minute** lifetime. Tokens carry `iat` and are invalidated against `user.password_changed_at` server-side — a password change logs out every live session within seconds, not days |
-| **Sliding refresh** | Frontend proactively calls `POST /auth/refresh` ~1 min before expiry to swap in a fresh 15-min token; users stay logged in transparently while stolen-token blast radius is capped at 15 min (vs. the industry-typical 24h–7d) |
+| **JWT access tokens** | HS256 via `PyJWT`, **30-minute** lifetime. Tokens carry `iat` and are invalidated against `user.password_changed_at` server-side — a password change logs out every live session within seconds, not days |
+| **Refresh tokens (OAuth-style)** | Long-lived opaque refresh tokens (32 bytes of `secrets.token_urlsafe` entropy) paired with the short-lived JWT. **SHA-256 hashed at rest** — a DB leak can't be replayed. **60-day rolling TTL** pushed forward on every successful refresh, so active users stay logged in indefinitely while idle devices naturally expire. Per-row revocation enables "log out this device"; `password_changed_at` + bulk-revoke covers "log out everywhere" and is auto-fired on password reset / account delete. Frontend stores access + refresh separately, proactively refreshes ~2 min before JWT expiry, and reactively retries once on 401 — concurrent requests share a single in-flight refresh via a promise singleton so a burst of tabs never stampedes the refresh endpoint |
 | **Login lockout** | Per-username lockout via DB columns (`failed_login_count`, `locked_until`): 5 failures → 5-minute lock. Works across 2 Gunicorn workers and survives container restarts, unlike per-process in-memory counters |
 | **Password reset** | **Signed-URL flow**: emailed link `/reset?token=<32-char urlsafe>`, 10-minute TTL, **single-use** (token consumed atomically at the DB layer; replay returns 400). Replaced an older 6-digit code flow — 10⁶ combinations is brute-forceable, ~2¹⁹⁰ is not. Frontend auto-parses `?token=` on mount and renders a dedicated "Check your email" confirmation view after submit |
 | **Secret key** | App **crashes on startup** if `DUGOUT_SECRET_KEY` is missing or set to a known placeholder — no silent fallback to a default |
@@ -168,7 +168,7 @@ Multi-layer security posture for a public-facing app with real users:
 | **ML** | scikit-learn (`HistGradientBoostingRegressor`, GMM), NumPy, pandas, joblib |
 | **Real-time** | SSE (`sse-starlette`) — draft room, live scores, and **event-driven notifications**; Web Push (VAPID) for OS-level alerts |
 | **Data** | MLB Stats API (rosters, depth charts, game logs, play-by-play, transactions), Statcast (pybaseball), **ESPN DTD injury scraper**, **RSS callup watcher** (MLB Trade Rumors, ESPN — feedparser + NLP speculation filter) |
-| **Auth** | 15-min JWT + sliding refresh; **argon2id** (lazy bcrypt migration); per-username lockout; signed-URL password reset; short-lived SSE tickets (Redis-backed); email verification via Resend |
+| **Auth** | 30-min JWT access tokens + 60-day rolling refresh tokens (SHA-256 hashed, per-device revocable); **argon2id** (lazy bcrypt migration); per-username lockout; signed-URL password reset; short-lived SSE tickets (Redis-backed); email verification via Resend |
 | **Infra** | AWS EC2 + **RDS PostgreSQL** (7-day automated backups, point-in-time recovery), Multi-stage Docker image, Cloudflare Tunnel |
 
 ---
@@ -524,6 +524,12 @@ Zero frontend changes, zero new dependencies, identical API response shapes. All
 
 **Phase-4 composite indexes:** Added four indexes against the most common real-world query shapes — `ix_transaction_league_created(league_id, created_at)`, `ix_notification_user_created(user_id, created_at)`, `ix_waiverclaim_league_status(league_id, status)`, `ix_ups_league_game(league_id, game_pk)` — so transaction history, notification feeds, waiver processing, and per-game scoring lookups all hit indexed reads instead of scans.
 
+**Composite > single-column (and catching the auto-generated duplicate):** The `refreshtoken` table needed a `(user_id, revoked_at)` composite to cover both the bulk-revoke hot path (`UPDATE WHERE user_id=? AND revoked_at IS NULL`) and a future "Active Sessions" UI as a leftmost-prefix match. Initial migration also shipped with `Column("user_id", ..., index=True)`, which SQLAlchemy quietly auto-created as a redundant single-column index that the planner would *never* pick over the composite. Caught in a post-deploy `pg_indexes` audit; shipped a same-day follow-up migration (`b7f8a9b0c1d2`) that drops the duplicate with `DROP INDEX IF EXISTS` so disk isn't wasted and every INSERT skips an unnecessary index write.
+
+**Statement-count regression guards:** On the auth hot path (refresh-token consume and bulk revoke), tests hook SQLAlchemy's `before_cursor_execute` event to *count* SELECTs and UPDATEs during the call and assert hard ceilings — e.g. `consume_refresh_token` must issue ≤ 2 SELECTs + exactly 1 UPDATE, and `revoke_refresh_tokens_for_user` for 20 devices must fire exactly 1 bulk UPDATE (not 20). Turns "someone reintroduced an N+1" from a user-ticket problem into a CI failure. Same pattern catches future regressions of the loop-per-row pattern the bulk UPDATE replaced.
+
+**Bounded two-phase cleanup for Postgres:** Nightly refresh-token pruning deletes expired / long-revoked rows but Postgres doesn't support `DELETE ... LIMIT` directly. Implemented as a two-phase pattern — `SELECT id ... LIMIT 5000` → `DELETE WHERE id IN (...)` — so even a giant backlog can never hold the table's write lock for more than one small batch. Scheduled at 3:30 UTC (off-peak for US users) via APScheduler; idempotent and safe to run repeatedly.
+
 **Bulk deletes for league reset / kick:** League reset and "kick user" flows were deleting `RosterSlot`, `WaiverClaim`, `MarketplaceListing`, etc. one row at a time in a loop (N round-trips). Replaced with SQLAlchemy `sa_delete(...).where(...)` so each entity class is cleared in a single `DELETE ... WHERE league_id = ?` — constant round-trips regardless of league size.
 
 **Scalar `COUNT(*)` vs. materialize-and-len:** `len(session.exec(...).all())` patterns (most notably the pending-waiver check) were loading the entire result set just to count it. Replaced with `select(func.count()).select_from(...).one()` — the DB returns a single scalar, the app never allocates the rows.
@@ -556,7 +562,7 @@ Graceful fallback: if Redis is unavailable, the app falls back to single-process
 
 **Structured error feedback:** All frontend `catch {}` blocks surface user-visible toast notifications instead of silently swallowing errors. Users always know when a network request fails.
 
-**Auto-logout on expired tokens:** The API client intercepts 401 responses, clears the stale JWT, and redirects to login — prevents infinite error loops from expired sessions. On normal traffic, the client also **proactively refreshes** the JWT ~1 min before expiry via `POST /auth/refresh`, so 15-min access tokens feel as seamless as a multi-hour session.
+**Dual-token refresh flow with single in-flight guard:** The API client stores access (JWT) and refresh tokens in separate `localStorage` slots. On every outbound request it **proactively refreshes** the JWT ~2 min before expiry via `POST /auth/refresh`; if a request still comes back `401`, it **reactively refreshes once and retries** the original call. Concurrent requests during a refresh window share a single in-flight promise (`_refreshInFlight` singleton), so a burst of tabs never fires parallel refresh calls. If the refresh itself fails, both tokens are cleared and the user is bounced to login. Net effect: short-lived 30-min access tokens feel like a permanent session, without storing a long-lived JWT anywhere.
 
 ### Client routing & mode switch
 
