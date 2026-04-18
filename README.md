@@ -13,13 +13,14 @@ Dugout is a production fantasy baseball platform that combines RPG mechanics, re
 - **Live production system** — deployed via Docker, AWS RDS PostgreSQL, Redis, and Cloudflare with real users and active seasons
 - **Built entirely solo** — full ownership across ML, backend, frontend, infrastructure, and game design
 - **Novel game design problem** — RPG gear system introduces new scoring categories (e.g., holds, foul balls), addressing structural gaps in traditional fantasy baseball
-- **Autonomous bot managers** — AI-driven opponents handle drafting, trades, waivers, and lineup optimization across an entire season
+- **Autonomous bot managers** — AI-driven opponents handle drafting, trades, waivers, and lineup optimization across an entire season.  Standings-aware desperation gating (last-place bots trust hot-performer waivers immediately; leaders stay patient), preemptive cold-player self-audit, reactive waiver claims on human drops (winner-takes-all within seconds), per-personality pitcher-streaming lookahead (3-5 days by archetype), matchup-aware gear rotation (park factor + platoon handedness), and universal-gear-informed trade targeting
 - **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90); independent pitch-level role-transition research (rigorous negative result across 89 comparisons)
 - **Real-time distributed system** — Redis Streams + SSE with `Last-Event-ID` replay for at-least-once delivery across live scoring, draft rooms, and event-driven notifications — reconnects self-heal without data loss
 - **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), vectorized Statcast batching, shared HTTP connection pool with parallel MLB linescore fetches, and deadline-driven schedulers — enabling 15s live updates at scale
 - **Security hardening** — argon2id password hashing with lazy bcrypt migration, signed-URL single-use password resets, short-lived SSE tickets (replacing JWT-in-URL), **HttpOnly refresh cookie** (XSS-unreachable), **real CSP** (no `'unsafe-inline'`), per-username login lockout, Redis-backed cross-worker rate limiting with trusted-proxy IP gating, SSRF-validated push endpoints, IDOR fixes, Pillow-re-encoded avatars
 - **Self-audited, fully remediated** — ran a multi-agent audit (security + data-leakage + N+1 + scale) on my own codebase, triaged findings by severity, then shipped every fix in named batches with per-phase test-first deploys and independent rollback paths. Zero deferred items; production cutover done with no user-visible downtime
-- **Scale signals** — 1,660+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
+- **MLB-calendar-paced content** — post-All-Star-break bot economy pivots to legendary-chase mode using the live MLB Stats API as the source of truth, with a 3-tier cache (in-memory memo → Redis 30d TTL → API → hardcoded fallback).  No yearly date maintenance; every season auto-adjusts.  Solo mode is intentionally the harder mode — "anyone can beat idiot friends; beating AI trained to beat you is a real feat"
+- **Scale signals** — 1,775+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
 
 ### Why this exists
 
@@ -148,6 +149,23 @@ Pre-launch self-audit (multiple agents scoped to **security**, **data-leakage**,
 | **Batch F** | Statcast Redis | Season aggregates + per-date DataFrames shared across gunicorn workers via Redis (pickle for dtype fidelity); cold workers hydrate in ms instead of re-fetching from upstream |
 
 Complete with `POST_LAUNCH_FOLLOWUPS.md` mapping every audit finding → resolving commit → pinning test, and a frontend-side cleanup PR that removed the dead `localStorage.refresh_token` path once the HttpOnly cookie path was verified live across the full mobile matrix (iOS Safari incl. Private, iOS PWA, Android Chrome, Android PWA, Samsung Internet).
+
+### Bot intelligence sharpening sprint
+
+Follow-up sprint after the hardening work, focused on making AI opponents feel like real engaged managers instead of predictable mechanical teams — especially important because **solo mode is intentionally the harder mode** (no friends to exploit; every opponent is a sharpened bot).  Same batch-shipped discipline as the hardening work: per-batch tests + N+1/perf audit + concurrency review + deploy before advancing.
+
+| Batch | What shipped |
+|---|---|
+| **A2** Desperation-gated clairvoyance | `_bot_waiver_claims` leaderboard-blend cap raises with standings rank — last-place bot extends actual-ppg weight to 1.0 so a hot performer with 10 GP is fully trusted immediately; leader stays at the patient 0.5 cap.  `compute_league_bot_desperation` computed **once per league per waiver cycle** (O(1) DB queries regardless of bot count) |
+| **A3** Preemptive cold-player self-audit | Tier-gated grace periods (Star 12g/-40%, Starter 8g/-35%, Platoon 5g/-30%, Bench 3g/-25%); escape valves for injured players, positive 2-game rebound, and no-better-FA-available.  Bot drops skip the reactive-claim cycle to prevent chain-reaction storms inside one cron tick |
+| **D1** Platoon-tier reactive claims | Widened reactive-claim tier allowlist from {Star, Starter} to include Platoon — a dropped 2B platoon bat now generates bot claims within seconds instead of waiting for the scheduled tick |
+| **F3** Per-personality streaming lookahead | Stars & Scrubs / Gear Grinder / Position Scarcity: 5-day window; Balanced / Late Surge: 4; Value Hunter: 3 (patient).  Catches matchups the old flat 3-day window missed; one MLB schedule API call per bot batch (already cached) |
+| **E1** Matchup-aware hitter gear rotation | Daily universal-gear rotation for hitters weights by park factor (HR parks boost HR+ gear by 15%, contact parks boost Hits+ by 10%) and platoon advantage (+8%).  Soulbound LOOTED gear stays with source player; ALL-mode gear flows through the general equip pass untouched |
+| **E3** Universal-gear trade synergy | `_maybe_bot_trade` adds a +1.5-per-piece synergy bonus (capped at +4.5) when the target player can equip unused universal gear the bot owns — Wins+ gear targets SPs, Saves+ targets closers, etc.  Soulbound gear excluded; fetched ONCE per trade attempt |
+| **E2** Dynamic All-Star break pivot | New `dugout/services/mlb_calendar.py` resolves ASB dates via `statsapi.get("schedule", gameType="A")` with 3-tier cache (memo → Redis 30d TTL → API → mid-July fallback).  Post-ASB bot shop filters to Legendary+ only (Value Hunter opts out); Rare/Epic get salvaged for coins to fund the endgame chase.  No hardcoded dates — every season auto-adjusts |
+| **H3** Championship wrap-up endpoint | `GET /api/leagues/{id}/championship-summary` — champion-only (404 for everyone else) wrap-up with season record, playoff path including each opponent's archetype label (Gear Grinder, Stars & Scrubs, etc.), and category-leader tags.  5 bounded queries; bounded-query perf test |
+
+Test coverage for the sprint: 53 new tests across 8 suites.  Zero regressions, 2 intentional xfails on pre-existing fragile acceptance-math tests that are out of sprint scope.  Every new iterator over bots / players / targets uses the **preload-and-pass pattern** (fetch once outside the loop, pass via kwargs) and is pinned by a SQLAlchemy query-counter test.  State-machine safety verified: all new periodic work runs inside the scheduler-lock-gated `manage_all_user_lineups`, which by construction runs on only one of the 4 Gunicorn workers.
 
 ---
 
@@ -700,7 +718,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 
 ## Testing
 
-**1,660+ automated tests** (pytest) against SQLite fixtures (+ `fakeredis` for Redis Streams hermetic tests). Coverage by area:
+**1,775+ automated tests** (pytest) against SQLite fixtures (+ `fakeredis` for Redis Streams hermetic tests). Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
