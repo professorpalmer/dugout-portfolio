@@ -17,8 +17,9 @@ Dugout is a production fantasy baseball platform that combines RPG mechanics, re
 - **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90); independent pitch-level role-transition research (rigorous negative result across 89 comparisons)
 - **Real-time distributed system** — Redis Streams + SSE with `Last-Event-ID` replay for at-least-once delivery across live scoring, draft rooms, and event-driven notifications — reconnects self-heal without data loss
 - **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), vectorized Statcast batching, shared HTTP connection pool with parallel MLB linescore fetches, and deadline-driven schedulers — enabling 15s live updates at scale
-- **Security hardening** — argon2id password hashing with lazy bcrypt migration, signed-URL single-use password resets, short-lived SSE tickets (replacing JWT-in-URL), per-username login lockout, Redis-backed cross-worker rate limiting with trusted-proxy IP gating, SSRF-validated push endpoints, IDOR fixes, Pillow-re-encoded avatars
-- **Scale signals** — 1,360+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
+- **Security hardening** — argon2id password hashing with lazy bcrypt migration, signed-URL single-use password resets, short-lived SSE tickets (replacing JWT-in-URL), **HttpOnly refresh cookie** (XSS-unreachable), **real CSP** (no `'unsafe-inline'`), per-username login lockout, Redis-backed cross-worker rate limiting with trusted-proxy IP gating, SSRF-validated push endpoints, IDOR fixes, Pillow-re-encoded avatars
+- **Self-audited, fully remediated** — ran a multi-agent audit (security + data-leakage + N+1 + scale) on my own codebase, triaged findings by severity, then shipped every fix in named batches with per-phase test-first deploys and independent rollback paths. Zero deferred items; production cutover done with no user-visible downtime
+- **Scale signals** — 1,660+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
 
 ### Why this exists
 
@@ -123,6 +124,30 @@ Multi-layer security posture for a public-facing app with real users:
 | **Pinned versions** | All packages pinned with upper bounds (e.g., `fastapi>=0.115.0,<1.0`) to prevent breaking upgrades |
 | **Multi-stage Docker** | `python:3.12-slim` final image; `pip install --no-cache-dir`; only necessary system packages |
 | **Global error handler** | All unhandled exceptions return generic `{"detail": "Internal server error"}` — no stack traces leak to clients |
+
+### Production hardening sprint
+
+Pre-launch self-audit (multiple agents scoped to **security**, **data-leakage**, **N+1 queries**, and **performance/scale**) surfaced 30+ findings across the codebase. Remediation shipped in **15 named, test-gated batches** with independent rollback paths — every change behind a failing-before / passing-after test and an `alembic upgrade head`-safe migration where the schema moved.
+
+| Batch | Category | What shipped |
+|---|---|---|
+| **SEC-H1 / SEC-M1** | Admin gate | Removed dev-mode bypass; `hmac.compare_digest` timing-safe compare; startup refuses to boot if `DUGOUT_DEV_MODE=true` + `ENVIRONMENT=production` |
+| **SEC-C2** | Push hijack | `/push/subscribe` rejects endpoints already owned by a different user — prevents "subscribe to someone else's device" attack |
+| **SEC-M2** | CSP | Dropped `'unsafe-inline'` from `script-src` (moved both inline scripts in `index.html` to `public/*.js`); runtime + static-build regression tests pin the header shape |
+| **SEC-M7** | Refresh cookie | HttpOnly / Secure / SameSite=Strict cookie on `/api/auth`, `DUGOUT_REFRESH_COOKIE_MODE` feature flag (`both`/`cookie`/`body`) for staged rollout, CORS `allow_credentials=True` with a startup guard against `"*"` origins |
+| **LEAK-C1** | SSE audience | Every `target_user_id` / `target_league_ids`-tagged event is filtered through `_deliver_to` on both XRANGE replay and live XREAD loops; mid-stream league membership changes self-heal every 60s |
+| **MEM-M1..M11** | League IDOR | 11 endpoints (league status, matchups, waivers, gear profiles, player search, etc.) gated through centralized `_require_league_member` / `_users_share_league` helpers |
+| **N+1 #1-13** | Query pressure | Bulk-prefs for notifications, pitcher-map preload for projections, per-league snapshot for bot pipeline, batch reversal for live accrual, `bulk_update_mappings` + threaded MLB API fans for roster sync |
+| **P4** | Pool + SSE | `pool_size/max_overflow/pool_timeout/statement_timeout` ENV-tunable; `SSESafeGZipMiddleware` subclasses `GZipMiddleware` to skip `/stream` paths (gzip would buffer SSE forever) |
+| **P10** | Indexes | 9 cross-dialect composite indexes via `CREATE INDEX IF NOT EXISTS` for idempotent apply |
+| **P11** | Session reuse | `_StatsAPIRequestsShim` replaces `statsapi.requests` in `dugout/__init__.py` (before any `statsapi` import) with the pooled `http_session`, without mutating the global `requests` module |
+| **P12** | Scheduler | Quiet-hours gated stale-accrual reconcile; leaderboard SWR cadence 5→15 min |
+| **P13** | Startup gating | `_alembic_at_head` check skips legacy `_safe_add_column` calls when migrations are current; daily season-points recalc moved from every-boot to APScheduler |
+| **Batch D** | APScheduler | Bot economy migrated from N `threading.Timer`s (one per bot-league pair) to APScheduler `DateTrigger` jobs — thread pool caps concurrent execution |
+| **Batch E** | Waiver sharding | `_auto_process_waivers` uses `ThreadPoolExecutor(max_workers=4)` with per-league `pg_try_advisory_lock` — proven no duplicate awards because two shards can't collide on the same league |
+| **Batch F** | Statcast Redis | Season aggregates + per-date DataFrames shared across gunicorn workers via Redis (pickle for dtype fidelity); cold workers hydrate in ms instead of re-fetching from upstream |
+
+Complete with `POST_LAUNCH_FOLLOWUPS.md` mapping every audit finding → resolving commit → pinning test, and a frontend-side cleanup PR that removed the dead `localStorage.refresh_token` path once the HttpOnly cookie path was verified live across the full mobile matrix (iOS Safari incl. Private, iOS PWA, Android Chrome, Android PWA, Samsung Internet).
 
 ---
 
@@ -675,7 +700,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 
 ## Testing
 
-**1,383+ automated tests** (pytest) against SQLite fixtures (+ `fakeredis` for Redis Streams hermetic tests). Coverage by area:
+**1,660+ automated tests** (pytest) against SQLite fixtures (+ `fakeredis` for Redis Streams hermetic tests). Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
