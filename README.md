@@ -20,7 +20,8 @@ Dugout is a production fantasy baseball platform that combines RPG mechanics, re
 - **Security hardening** — argon2id password hashing with lazy bcrypt migration, signed-URL single-use password resets, short-lived SSE tickets (replacing JWT-in-URL), **HttpOnly refresh cookie** (XSS-unreachable), **real CSP** (no `'unsafe-inline'`), per-username login lockout, Redis-backed cross-worker rate limiting with trusted-proxy IP gating, SSRF-validated push endpoints, IDOR fixes, Pillow-re-encoded avatars
 - **Self-audited, fully remediated** — ran a multi-agent audit (security + data-leakage + N+1 + scale) on my own codebase, triaged findings by severity, then shipped every fix in named batches with per-phase test-first deploys and independent rollback paths. Zero deferred items; production cutover done with no user-visible downtime
 - **MLB-calendar-paced content** — post-All-Star-break bot economy pivots to legendary-chase mode using the live MLB Stats API as the source of truth, with a 3-tier cache (in-memory memo → Redis 30d TTL → API → hardcoded fallback).  No yearly date maintenance; every season auto-adjusts.  Solo mode is intentionally the harder mode — "anyone can beat idiot friends; beating AI trained to beat you is a real feat"
-- **Scale signals** — 1,775+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
+- **Asymmetric-info bot edge** — projections include umpire strike-zone profiles (self-learning from our own scored games after a bootstrap), travel/rest context (great-circle distance + TZ crossings + pitcher rest curve), and batter-vs-pitcher career priors with empirical Bayes shrinkage to league average.  **Bot CLV audit** captures every trade/waiver decision with a projection snapshot and resolves the delta 7 days later — per-bot confidence multiplier (±15% hard cap) tunes each individual bot toward or away from its personality baseline based on rolling track record, without ever mutating the archetype constants
+- **Scale signals** — 1,878+ tests, ~200 gear items, 6 AI archetypes, 39-feature ML models, full production infrastructure
 
 ### Why this exists
 
@@ -166,6 +167,21 @@ Follow-up sprint after the hardening work, focused on making AI opponents feel l
 | **H3** Championship wrap-up endpoint | `GET /api/leagues/{id}/championship-summary` — champion-only (404 for everyone else) wrap-up with season record, playoff path including each opponent's archetype label (Gear Grinder, Stars & Scrubs, etc.), and category-leader tags.  5 bounded queries; bounded-query perf test |
 
 Test coverage for the sprint: 53 new tests across 8 suites.  Zero regressions, 2 intentional xfails on pre-existing fragile acceptance-math tests that are out of sprint scope.  Every new iterator over bots / players / targets uses the **preload-and-pass pattern** (fetch once outside the loop, pass via kwargs) and is pinned by a SQLAlchemy query-counter test.  State-machine safety verified: all new periodic work runs inside the scheduler-lock-gated `manage_all_user_lineups`, which by construction runs on only one of the 4 Gunicorn workers.
+
+### Matchup edge sprint
+
+Third major follow-up sprint, inspired by prediction-market concepts (closing line value, asymmetric information).  Four projection/bot-edge features where every capability is designed to serve **both** projections and bot decisions — single codepath, double win.  Most fantasy platforms (and human users) never check these signals; bots that consult them gain a small, compounding edge.
+
+| Batch | What shipped |
+|---|---|
+| **Umpire strike-zone profiles** | New `UmpireProfile` model with self-learning architecture.  Impact values bounded ±8%.  Blend math: pure bootstrap < 20 games → 50/50 @ 20 → pure self-learned @ 50+.  Today's HP ump extracted from MLB `boxscore_data` officials array, persisted into new `PlayerGameLog.home_plate_ump` column, aggregated nightly against each pitcher's season baseline.  Applied to pitcher projections via K60/BB40 composite, bounded [0.92, 1.08].  Bootstrap path is optional / manual-admin-trigger (not a cron) so a broken upstream scrape can never take down the live service — self-learning is the long-term source of truth |
+| **Travel / rest context** | `dugout/data/mlb_cities.py` with 30 MLB cities + haversine distance + Olson-TZ offset math — pure compute, no new DB table.  Hitter penalty: cross-country (>1500mi) -4%, TZ crossings -1%/zone (cap -3%), bounds [0.95, 1.00] (never boosts, only penalizes).  Starter rest curve: 3d=0.95, 4d=0.98, 5d=1.00, 6d=1.02, 7+d=0.98, bounds [0.95, 1.05].  Safe fallback to 1.0 on any lookup failure so projections never fail closed |
+| **BvP matchup priors** | `bvp_matchup.py` wraps MLB Stats API `stats(group=hitting,type=vsPlayer)` with a 24h Redis cache (`bvp:{batter_id}:{pitcher_id}`).  Empirical Bayes shrinkage to league avg .245 anchored at 30 PA so small samples don't swing decisions; factor bounded [0.85, 1.20].  Bot waiver claims apply the factor to FA hitter `_proj_cached` with a per-run `_bvp_factor_cache` (O(1) after first lookup).  Bot trade acceptance multiplies both `v_in` and `v_out` by `_trade_side_bvp_avg` so both sides of the ledger reflect today's matchups |
+| **Bot CLV audit** | New `BotDecisionAudit` model captures every bot trade offer / accept / reject / waiver claim with a projection snapshot at decision time.  Nightly `resolve_pending_audits` re-projects 7-day-old decisions and writes `clv_delta`.  `apply_bot_confidence_multiplier` gives each individual bot a bounded **±15% self-tune** on `trade_accept_min_ratio` based on rolling 30-day CLV — dead zone ±0.05, step size 5%, hard cap 15%.  **Personality archetype constants are never mutated** (archetype identity stays intact by design).  `GET /api/admin/bot-clv?days=30` admin-gated endpoint exposes per-personality aggregates + drift counts for mid-season design tuning |
+
+Capture hooks are additive and try/except-wrapped, so any CLV capture failure never kills the underlying bot transaction.  Two new nightly crons (`umpire_learn` at 04:00 UTC, `bot_clv_resolution` at 03:30 UTC) both include startup catch-up wiring so container restarts don't drop a scheduled run.
+
+Test coverage for the sprint: **67 new tests across 4 suites** (umpire blend + projection integration, travel/rest bounds + safe defaults, BvP shrinkage + cache hit-miss + bot integration, CLV capture + resolution + summary + multiplier bounds).  **Source-level regression tests** pin critical wiring — `_ump_projection_factor` still called in `project_player`, BvP enrichment still applied in both trade paths, personality constants still immutable — so the features can't silently regress in a future edit.  Full suite 1,878 passing post-ship.
 
 ---
 
@@ -718,7 +734,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 
 ## Testing
 
-**1,775+ automated tests** (pytest) against SQLite fixtures (+ `fakeredis` for Redis Streams hermetic tests). Coverage by area:
+**1,878+ automated tests** (pytest) against SQLite fixtures (+ `fakeredis` for Redis Streams hermetic tests). Coverage by area:
 
 | Area | Tests | What's covered |
 |------|------:|----------------|
@@ -740,6 +756,7 @@ Statcast data feeds into projections (15 hitter / 14 pitcher features), the Rese
 | **User profiles & badges** | 17 | UserBadge model CRUD, profile API (full data return, 404 handling, batch league loading, empty state), avatar upload (valid JPEG, oversized rejection, bad content type, auth required, 404 serve, old avatar cleanup on re-upload), badge awarding (season-end creation, first_season dedup, mode labels), User model new fields |
 | **Daily optimizer** | 30 | Daily candidate building (off-day detection, injury filtering, gear integration, SP probable status), matchup info assembly (opposing pitcher, platoon, park factor, lookahead games), **scarcity bonus** (today-only players get tie-breaker edge), gear stacking with scarcity, reasoning generation (start/bench natural language with "today only" and matchup context), constrained assignment correctness |
 | **Sandbox (pitcher research)** | 256 | Role detection, decomposition, projection, simulation, pitch profiles, velo models, signal models, structural signals (TTO/entropy/fatigue/platoon), validation, data loading, models, registry |
+| **Matchup edge sprint** | 67 | **Umpire profiles** (17) — name normalization, `clamp_impact` bounds, Savant HTML parser tolerance, bootstrap upsert/update, 3-stage blend math across 20/50 sample-size thresholds, `get_profile` unknown-ump fallback, projection factor bounded ±8%, source-level wiring.  **Travel/rest** (19) — haversine LAD↔NYM, TZ crossing math, cross-country next-day penalty, rest-day softening, same-city no-op, unknown-team safe default, 3d/4d/5d/6d/7+d rest curve, reliever exclusion, bounds enforcement.  **BvP matchup** (16) — shrinkage at 5/100/extreme PA, factor clamping at 0.85/1.20, missing mlb_ids, API failure → None, API response parsing, **cache hit skips API / cache miss writes to cache** via monkeypatched `get_sync_client`, trade-side averaging over hitters only, source-level hook pinning.  **Bot CLV audit** (15) — capture row shape for offer/accept/reject/waiver, capture failure does not raise, resolve cutoff skipping, delta computation, per-personality aggregation, confidence multiplier bounds ±15%, dead zone ±0.05, extreme-CLV clamp, source-level **personality-constants-not-mutated** guard |
 | **Other** | 50+ | Auth, balance, matchup scheduling, weekly lineup optimizer, batch projections, waiver hold visibility, transaction export, season point estimator (hitter/pitcher/TWP), integration-style API flows |
 
 ---
