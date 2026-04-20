@@ -14,7 +14,7 @@ Dugout is a production fantasy baseball platform that combines RPG mechanics, re
 - **Built entirely solo** — full ownership across ML, backend, frontend, infrastructure, and game design
 - **Novel game design problem** — RPG gear system introduces new scoring categories (e.g., holds, foul balls), addressing structural gaps in traditional fantasy baseball
 - **Autonomous bot managers** — AI-driven opponents handle drafting, trades, waivers, and lineup optimization across an entire season.  Standings-aware desperation gating (last-place bots trust hot-performer waivers immediately; leaders stay patient), preemptive cold-player self-audit, reactive waiver claims on human drops (winner-takes-all within seconds), per-personality pitcher-streaming lookahead (3-5 days by archetype), matchup-aware gear rotation (park factor + platoon handedness), and universal-gear-informed trade targeting
-- **Custom ML pipeline** — Marcel baseline → Statcast correction → gradient-boosted quantile models (p10/p50/p90); independent pitch-level role-transition research (rigorous negative result across 89 comparisons)
+- **Custom ML pipeline** — six-layer bounded projection engine: Marcel baseline (5/4/3 weighting, role-specific reliability) → in-season blend → Statcast luck correction → gradient-boosted quantile models (p10/p50/p90) → self-learning umpire adjustment → travel/rest context. Every layer individually capped so no single signal can dominate. Independent pitch-level role-transition research preserved as a rigorous negative result (89 cross-validated comparisons, all three architectures p > 0.05)
 - **Real-time distributed system** — Redis Streams + SSE with `Last-Event-ID` replay for at-least-once delivery across live scoring, draft rooms, and event-driven notifications — reconnects self-heal without data loss
 - **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), vectorized Statcast batching, shared HTTP connection pool with parallel MLB linescore fetches, and deadline-driven schedulers — enabling 15s live updates at scale
 - **Security hardening** — argon2id password hashing with lazy bcrypt migration, signed-URL single-use password resets, short-lived SSE tickets (replacing JWT-in-URL), **HttpOnly refresh cookie** (XSS-unreachable), **real CSP** (no `'unsafe-inline'`), per-username login lockout, Redis-backed cross-worker rate limiting with trusted-proxy IP gating, SSRF-validated push endpoints, IDOR fixes, Pillow-re-encoded avatars
@@ -236,38 +236,54 @@ Test coverage for the sprint: **67 new tests across 4 suites** (umpire blend + p
 
 ### 1. Player projections — Marcel-anchored ML
 
-Five-layer projection architecture combining sabermetric priors with gradient-boosted ML, modeled after how professional systems (ZiPS, Steamer) blend actuarial baselines with in-season data:
+Six-layer projection architecture combining sabermetric priors, gradient-boosted ML, and bounded post-adjustments — modeled after how professional systems (ZiPS, Steamer) blend actuarial baselines with in-season data, with every layer individually capped so no single signal can blow up a projection:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Layer 1 — Marcel Baseline                                   │
 │  PlayerSeasonStats (2023–2025) → 5/4/3 year weighting →     │
-│  regression to mean → age adjustment                         │
+│  regression to mean (1200 PA / 400 IP SP / 150 IP RP) →     │
+│  age curve peaking at 29                                     │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 2 — In-Season Blend                                   │
 │  Marcel anchor + 2026 game logs (0% → 65% ramp over 80 G)  │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 3 — Statcast Luck Correction                          │
-│  xBA/xSLG/xERA vs actual → ±15% adjustment                  │
+│  xBA/xSLG/xERA vs actual → hitter ±15%, pitcher ±10%        │
 ├─────────────────────────────────────────────────────────────┤
 │  Layer 4 — ML Context Adjustment                             │
 │  HistGradientBoostingRegressor p10/p50/p90 (39H / 28P       │
-│  features) → clamped ±25–35% nudge on anchor                 │
+│  features) → multiplicative nudge clamped [0.75, 1.35]      │
 ├─────────────────────────────────────────────────────────────┤
-│  Layer 5 — Range Construction                                │
-│  p10/p90 from ML quantiles or sensible anchor-based defaults │
+│  Layer 5 — Umpire Adjustment (pitchers, current-day only)    │
+│  Self-learning strike-zone profile (bootstrap < 20 games →  │
+│  50/50 @ 20 → pure self-learned @ 50+) → K60/BB40 composite │
+│  bounded ±8%                                                 │
+├─────────────────────────────────────────────────────────────┤
+│  Layer 6 — Travel / Rest Context                             │
+│  Hitters: great-circle distance + TZ crossings, bounds       │
+│  [0.95, 1.00] (penalty-only).                                │
+│  Starters: rest-day curve (3d=0.95 / 5d=1.00 / 7+d=0.98),   │
+│  bounds [0.95, 1.05]                                         │
+├─────────────────────────────────────────────────────────────┤
+│  Output — Range Construction                                 │
+│  p10/p90 from ML quantiles or anchor-based defaults          │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Layer 1 — Marcel baseline:** Multi-year weighted projection using `PlayerSeasonStats` (2023–2025). Weights years 5/4/3 (most recent heaviest), regresses rate stats toward league average based on **raw** career volume (not inflated by year weights), and applies an age curve from `Player.birth_year`. Two-way players get combined `hitting_value + (pitching_value × starts_per_game_ratio)` — their full fantasy value, not just one side.
+**Layer 1 — Marcel baseline:** Multi-year weighted projection using `PlayerSeasonStats` (2023–2025). Weights years 5/4/3 (most recent heaviest), regresses rate stats toward league average based on **raw** career volume (not inflated by year weights), and applies an age curve from `Player.birth_year`. Reliability denominators differ by role: 1200 PA for hitters, 400 IP for starters, **150 IP for relievers** (calibrated for ~60 IP/year closers vs. ~180 IP/year starters). Two-way players get combined `hitting_value + (pitching_value × starts_per_game_ratio)` — their full fantasy value, not just one side.
 
 **Layer 2 — In-season blend:** As 2026 game logs accumulate, blends the Marcel baseline with actual `PlayerGameLog` performance. Ramp: 0% actual at 0 games → 65% actual at 80 games. Prevents early-season volatility from overriding multi-year track records.
 
-**Layer 3 — Statcast enhancement:** Applies "luck correction" adjustments (up to ±15%) based on differentials between expected stats (xBA, xSLG, xERA from pybaseball) and actual stats. A hitter with a .220 BA but .280 xBA gets an upward nudge — their batted ball quality suggests regression toward better results.
+**Layer 3 — Statcast enhancement:** Applies "luck correction" adjustments based on differentials between expected stats (xBA, xSLG, xERA from pybaseball) and actual stats. A hitter with a .220 BA but .280 xBA gets an upward nudge — their batted ball quality suggests regression toward better results. Caps: hitters ±15%, pitchers ±10%.
 
-**Layer 4 — ML context adjustment:** Three **`HistGradientBoostingRegressor`** models per player type (hitter/pitcher) produce **p10, p50, p90** quantile predictions. The ML p50 is used as a contextual "nudge" (clamped ±25–35%) on the Statcast-enhanced anchor — not as the sole prediction.
+**Layer 4 — ML context adjustment:** Three **`HistGradientBoostingRegressor`** models per player type (hitter/pitcher) produce **p10, p50, p90** quantile predictions. The ML p50 is used as a contextual nudge — multiplicatively clamped to **[0.75, 1.35]** on the Statcast-enhanced anchor — not as the sole prediction. The bounded clamp is deliberate: tree ensembles on small-sample baseball features can produce volatile multipliers on individual players, and the clamp keeps the ML signal additive to the sabermetric anchor rather than overriding it.
 
-**Layer 5 — Range construction:** p10/p90 from ML quantile models or sensible defaults based on the enhanced anchor.
+**Layer 5 — Umpire adjustment (pitchers, current-day only):** Each pitcher projection is nudged by the scheduled home-plate umpire's self-learned strike-zone profile. Bootstrap path (Baseball Savant umpire scorecards) seeds cold starts; the self-learning path accumulates per-umpire residuals against each pitcher's baseline after every scored game. Blend: pure bootstrap below 20 games, linear 50/50 at 20, pure self-learned at 50+. Factor is a K60/BB40 composite bounded **±8%**. Today's umpire assignment is resolved from the MLB `boxscore_data` officials array.
+
+**Layer 6 — Travel / rest context:** Hitter penalty uses great-circle distance + timezone crossings from `dugout/data/mlb_cities.py`: cross-country (>1500 mi) −4%, −1% per timezone zone crossed (capped at −3%), bounded **[0.95, 1.00]** — penalty-only, never a boost. Pitcher rest curve: 3d = 0.95, 4d = 0.98, 5d = 1.00, 6d = 1.02, 7+d = 0.98, bounded **[0.95, 1.05]**. Safe-fallback to 1.0 on any lookup failure so projections never fail closed.
+
+**Output — Range construction:** p10/p90 from ML quantile models or sensible defaults based on the adjusted anchor.
 
 **Hitter feature set (39 features):**
 - **17 box-score rolling:** 5g/15g rolling averages for hits, HR, RBI, runs, SB, walks, doubles, fantasy points; season AVG/OBP/SLG; hit streak length; games played
