@@ -41,7 +41,7 @@ See below for architecture, ML pipeline, and system design.
 |-----------------|---------------------|-------------|----------------|
 | ![Profile](screenshots/profile.png) | ![Leaderboard](screenshots/research-leaderboard.png) | ![Free Agents](screenshots/research-free-agents.png) | ![Compare](screenshots/research-compare.png) |
 
-**[View all 28 screenshots →](SCREENSHOTS.md)** — landing, live scores, box scores, matchups, scoring breakdowns, league standings, gear locker, shop, catalogue, waivers, trades, projections, lineup optimizer, research hub, leaderboard, free agents, player compare, player deep-dive, team profiles, user profiles, notifications, and more.
+**[View all 31 screenshots →](SCREENSHOTS.md)** — landing, live scores, box scores, matchups, scoring breakdowns, league standings, gear locker, shop, catalogue, waivers, trades, Catan-style counter offers, projections, lineup optimizer, research hub, leaderboard, free agents, player compare, player deep-dive, team profiles, user profiles, notifications, and more.
 
 ---
 
@@ -486,7 +486,13 @@ Daily processing in the early-morning ET window. Dropped players sit on waivers 
 
 ### Catan-style trade counter offers (depth-1)
 
-Inspired by Settlers of Catan's trade UI: when a bot would otherwise reject an offer, it constructs a **counter-proposal** whose shape is driven by the personality's `counter_greed` knob rather than always plain-rejecting. Depth-1 means a counter can't itself be countered — the original moves to a terminal `COUNTERED` status, a new `Trade` row is inserted with roles flipped and a parent-trade FK linking back, and the whole thing commits in a single transaction.
+> **Not shipped by any major fantasy platform.** ESPN, Yahoo, Sleeper, CBS, Fantrax, NFL.com, MyFantasyLeague, Ottoneu — all use the same binary Accept / Reject / Expire model that's been unchanged since the late 1990s. If you want to negotiate on any of them, you reject and send a fresh proposal from scratch, losing all context. The pattern is borrowed from **Settlers of Catan** and commerce UIs (eBay Best Offer, OfferUp); the bot-counter intelligence layered on top is unique to Dugout because no other fantasy platform has a sharpened bot AI to plug into it.
+
+| Incoming proposal | Counter modal (original players pre-checked on both sides) | Counter sent |
+|---|---|---|
+| ![Incoming trade with Accept/Reject/Counter](screenshots/trade-counter-incoming.png) | ![Counter modal with pre-populated picks](screenshots/trade-counter-modal.png) | ![Outgoing counter with COUNTER OFFER badge](screenshots/trade-counter-sent.png) |
+
+When a bot would otherwise reject an offer, it constructs a **counter-proposal** whose shape is driven by the personality's `counter_greed` knob rather than always plain-rejecting. Depth-1 means a counter can't itself be countered — the original moves to a terminal `COUNTERED` status, a new `Trade` row is inserted with roles flipped and a parent-trade FK linking back, and the whole thing commits in a single transaction.
 
 | Personality | `counter_offer_chance` | `counter_greed` | Feel |
 |---|---|---|---|

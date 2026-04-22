@@ -64,6 +64,14 @@ All screenshots from the live production app (mobile PWA).
 |------------------------|-----------------|
 | ![Trade Propose](screenshots/trade-propose.png) | ![Trade Outgoing](screenshots/trade-outgoing.png) |
 
+### Catan-style Counter Offers (depth-1)
+
+Not shipped by any major fantasy platform. Borrowed from Settlers of Catan and commerce UIs.
+
+| Incoming Proposal (Accept / Reject / Counter) | Counter Modal (both original players pre-checked) | Counter Sent (roles flipped, badge visible) |
+|-----------------------------------------------|----------------------------------------------------|----------------------------------------------|
+| ![Counter Incoming](screenshots/trade-counter-incoming.png) | ![Counter Modal](screenshots/trade-counter-modal.png) | ![Counter Sent](screenshots/trade-counter-sent.png) |
+
 ---
 
 ## Intelligence & Research
