@@ -480,6 +480,38 @@ Daily processing at **8 AM ET**. Dropped players sit on waivers for **2 days** b
 
 **League-wide rolling 7-day cap** scales with the season: 2 proposals/week early (>10 weeks to playoffs) → 3 mid-season → 5 near playoffs (≤4 weeks). Per-bot attempt chances are low (6–14%) so proposals trickle in organically. **Bots trade with any league member** — humans and other bots alike — so the marketplace feels active even in solo mode. Trade matching finds same-position-bucket players within the personality's max projection gap; 60/40 bias toward best trade vs. random. Incoming trade acceptance uses personality-specific `accept_min_ratio` and `accept_min_surplus` thresholds with injury discount. Late Surge bots ramp via a multiplier (1.0× → 1.6×) as playoffs approach.
 
+**Human-target bias (1.75×):** A 72-trade audit revealed bots were proposing overwhelmingly to other bots because the complementarity scorer treated every league member identically. Added a multiplier on `_complementarity` for human targets so bots actively seek out human trade partners without ignoring bot-to-bot activity — human solo-mode players now see 2–3× the inbound proposal rate without breaking the organic feel in mixed leagues.
+
+**`resolution_reason` audit column (ops-only):** Every rejection now persists a tagged reason (`ratio_too_low`, `best_player_parity`, `surplus_too_low`, `v_in_nonpositive`, etc.) on the `Trade` row — not surfaced to users, purely for SQL-queryable distribution analysis. `SELECT split_part(resolution_reason, ':', 1), COUNT(*) FROM trade WHERE status = 'REJECTED' GROUP BY 1` is how we actually tune bot thresholds instead of guessing. Pinned by a source-level regression test asserting each rejection branch emits a distinct tag prefix.
+
+### Catan-style trade counter offers (depth-1)
+
+Inspired by Settlers of Catan's trade UI: when a bot would otherwise reject an offer, it constructs a **counter-proposal** whose shape is driven by the personality's `counter_greed` knob rather than always plain-rejecting. Depth-1 means a counter can't itself be countered — the original moves to a `COUNTERED` terminal status (new enum value), a new `Trade` row is inserted with roles flipped and `parent_trade_id` linking back, and the whole thing commits in a single transaction.
+
+| Personality | `counter_offer_chance` | `counter_greed` | Feel |
+|---|---|---|---|
+| **Stars & Scrubs** | 0.20 | **1.00** | Rarely counters, but when they do it's rude — piles 4–5 of the proposer's best players before the bot parts with their ace |
+| **Late Surge** | 0.25 | 0.85 | Playoff-protective, demands the moon |
+| **Position Scarcity** | 0.40 | 0.55 | Moderate demands scaled to positional need |
+| **Balanced** | 0.40 | 0.40 | Fair dealer, reasonable counters |
+| **Gear Grinder** | 0.55 | 0.25 | Counters often, asks for small add-ons |
+| **Value Hunter** | 0.65 | 0.10 | Most liquid — counters with minimum viable sweetener |
+
+Greed drives two things simultaneously: `demanded_extra = gap × (1 + greed × 3.0)` (how much above the EV gap the bot demands) AND whether the bot is willing to demand the proposer's stars in the pile. Low-greed bots stick to bench pieces; high-greed bots go after stars — exactly the "25 bricks for a wood" Catan vibe that signals "I'm not moving off my guy easily" without being a flat reject.
+
+**Safety rails** (the "don't get conned" layer):
+
+- **Counter must pass the bot's own accept-math** when fed back hypothetically as recipient. If greed demands more value than the proposer's roster can actually provide, construction fails and the bot plain-rejects.
+- **Quantity-trap short-circuit:** if the original tripped `best_player_parity` (5-for-Trout exploit attempt), the bot rejects cleanly with NO counter. Don't reward exploits.
+- **Parity-anchor pile construction:** when the bot is giving up a star, the add-on pile MUST include at least one near-star piece or the hypothetical accept check will reject with parity mismatch. Algorithm picks the cheapest parity-clearing candidate first, then fills around it cheapest-first to hit the greed floor.
+- **Never downgrades own STAR-tier player in a swap counter, regardless of greed.**
+- **Hard cap of 5 players in the add-on pile** — beyond that the counter stops being readable and starts hitting roster-size limits.
+- **Depth-1 hard gate:** `parent_trade_id is not None` → plain reject, no matter the personality.
+
+Personality-specific message templates (`single_add_polite` / `multi_add_rude` / `swap`) surface the greed mode in text — a Stars & Scrubs counter reads *"Not moving off Trout easy. Counter: Elly + Skubal + Witt + 2 bench"* while Value Hunter says *"Close deal. Add [bench arm] and I'm in."* Template selection is greed-gated, then a random template picked within mode so the same bot doesn't sound like a broken record.
+
+Test coverage: **15 new tests across 2 suites** — 7 human-flow (happy path, depth-1 gate, auth gate, roster legality, deadline enforcement, notification firing, terminal status) + 8 bot-construction (low/high-greed shape, pile cap, own-accept-math rail, quantity-trap skip, depth-1 gate, chance-roll gate, audit tag presence). Zero regressions across 404 bot/trade tests.
+
 ### Bot marketplace intelligence
 
 Bots don't just randomly list and buy gear — they make personality-driven decisions that mimic engaged human players. **Gear Grinder bots** are the most active marketplace participants (~2.5× the listing rate of Value Hunters), sell at discount for volume (`greed_markup=0.92`), pay full retail for upgrades, and **buy from the weekly shop** aggressively (`shop_buy_eagerness=0.70`):
