@@ -14,7 +14,8 @@ Dugout is a production fantasy baseball platform that combines RPG mechanics, re
 - **Built entirely solo** — full ownership across ML, backend, frontend, infrastructure, and game design
 - **Novel game design problem** — RPG gear system introduces new scoring categories (e.g., holds, foul balls), addressing structural gaps in traditional fantasy baseball
 - **Autonomous bot managers** — AI-driven opponents handle drafting, trades, waivers, and lineup optimization across an entire season.  Standings-aware desperation gating (last-place bots trust hot-performer waivers more aggressively; leaders stay patient), preemptive cold-player self-audit, reactive waiver claims on human drops (winner-takes-all within seconds), per-personality pitcher-streaming lookahead, matchup-aware gear rotation (park factor + platoon handedness), and universal-gear-informed trade targeting
-- **Custom ML pipeline** — six-layer bounded projection engine: Marcel baseline (5/4/3 weighting, role-specific reliability) → in-season blend → Statcast luck correction → gradient-boosted quantile models (p10/p50/p90) → self-learning umpire adjustment → travel/rest context. Every layer individually capped so no single signal can dominate. Independent pitch-level role-transition research preserved as a rigorous negative result (89 cross-validated comparisons, all three architectures p > 0.05)
+- **Custom ML pipeline** — six-layer bounded projection engine: Marcel baseline (5/4/3 weighting, role-specific reliability) → in-season blend → Statcast luck correction → gradient-boosted quantile models (p10/p50/p90) → self-learning umpire adjustment → travel/rest context. Every layer individually capped so no single signal can dominate. Pitcher role-transition research: pitch-level Statcast signals showed no statistically significant improvement over flat conversion factors (89 CV comparisons, all p > 0.05) — pivoted to **aggregate-signal dynamic classification with hysteresis bands**, now live in production (see below)
+- **Dynamic pitcher role classification** — continuous in-season role detection with asymmetric **hysteresis bands**, the same anti-flap pattern used in BGP route damping and control-theory thermostats, preventing borderline pitchers from flip-flopping classifications as the rolling window evolves. **No other fantasy platform does this algorithmically** — ESPN and Yahoo rely on human-curated closer reports; the gear-eligibility system needs continuous automated classification, so I built one. Correctly identifies modern "fireman" dual-role relievers (pitchers used in both save AND hold situations depending on matchup) as a distinct class with dual gear eligibility. Boundary behavior locked down by a dedicated spec-test suite.
 - **Real-time distributed system** — Redis Streams + SSE with `Last-Event-ID` replay for at-least-once delivery across live scoring, draft rooms, and event-driven notifications — reconnects self-heal without data loss
 - **Performance engineering** — eliminated 29+ N+1 query paths (93–99% reduction), vectorized Statcast batching, shared HTTP connection pool with parallel MLB linescore fetches, and deadline-driven schedulers — enabling 15s live updates at scale
 - **Security hardening** — argon2id password hashing with lazy bcrypt migration, signed-URL single-use password resets, short-lived SSE tickets (replacing JWT-in-URL), **HttpOnly refresh cookie** (XSS-unreachable), **real CSP** (no `'unsafe-inline'`), per-username login lockout, Redis-backed cross-worker rate limiting with trusted-proxy IP gating, SSRF-validated push endpoints, IDOR fixes, Pillow-re-encoded avatars
@@ -150,6 +151,8 @@ Pre-launch self-audit (multiple agents scoped to **security**, **data-leakage**,
 | **Batch F** | Statcast Redis | Season aggregates + per-date DataFrames shared across workers via Redis (pickle for dtype fidelity); cold workers hydrate in ms instead of re-fetching from upstream |
 
 Complete with an internal `POST_LAUNCH_FOLLOWUPS.md` mapping every audit finding → resolving commit → pinning test, and a frontend-side cleanup PR that removed the dead `localStorage` refresh-token path once the HttpOnly cookie path was verified live across the full mobile matrix (iOS Safari incl. Private, iOS PWA, Android Chrome, Android PWA, Samsung Internet).
+
+**Cross-layer production debugging (example):** diagnosed a propagation issue where time-sensitive bootstrap-script updates were intermittently stale to users despite the origin serving fresh content with strict no-cache headers. Traced the issue through the browser → service worker → origin response → CDN edge layer, identified the override interaction, and resolved with an architectural fix that eliminated the stale-delivery path **while preserving strict CSP** (no `'unsafe-inline'` regression). Same audit surfaced a secondary MIME-type issue in static-asset serving, fixed at the application layer so container-image minimization couldn't silently degrade asset delivery. Illustrates the kind of systematic cross-layer root-cause analysis that the sprint's security posture depends on.
 
 ### Bot intelligence sharpening sprint
 
@@ -326,18 +329,18 @@ Role-aware **absolute thresholds** on `projected_pts_per_game` with separate cut
 
 **Two-way player handling:** TWP players (Ohtani) are always classified as hitters for tiering purposes — their pitching adds value but shouldn't push them into SP-tier thresholds where combined value doesn't reach "Star." The Marcel projection already combines both sides, so the hitter threshold captures their full fantasy impact.
 
-**Granular pitcher roles (`PitcherRole`):** Beyond SP/RP, every pitcher is classified into one of 6 roles based on aggregated `PlayerSeasonStats`:
+**Granular pitcher roles (`PitcherRole`):** Beyond SP/RP, every pitcher is classified into one of 6 roles from a blend of in-season usage aggregates and career-stat fallback (see §6 for the full classifier design):
 
-| Role | Criteria |
-|------|----------|
-| **STARTER** | ≥ 50% games started |
-| **CLOSER** | < 50% GS, ≥ 5 career saves with ≥ 15% save rate |
-| **SETUP_MAN** | RP with ≥ 1.0 IP/appearance and high K rate (≥ 0.8 K/IP) |
-| **SWINGMAN** | RP with ≥ 1.5 IP/appearance (long relief / spot starts) |
-| **MIDDLE_RELIEVER** | Default RP classification |
-| **UNKNOWN** | Insufficient data |
+| Role | Archetype |
+|------|-----------|
+| **STARTER** | Rotation-first (majority starts, multi-inning appearances) |
+| **CLOSER** | Pure 9th-inning reliever, save-heavy |
+| **SETUP_MAN** | Dual-role "fireman" OR high-leverage setup pattern — the only role with both save-gear AND hold-gear eligibility |
+| **SWINGMAN** | Opener / bulk / spot-starter mixed usage |
+| **MIDDLE_RELIEVER** | Default relief classification (low-leverage, mop-up) |
+| **UNKNOWN** | Insufficient data (new callup, injury return) |
 
-Pitcher roles feed into **gear equip restrictions** (Saves+ gear only on closers/setup men, Wins+ only on starters/swingmen) and loot drop pool filtering.
+Dynamic classification with hysteresis bands updates roles weekly on a background job; career-stat fallback covers small-sample cases. Pitcher roles feed into **gear equip restrictions** (Saves+ gear only on closers/setup men, Holds+ only on middle relievers/setup men, Wins+ only on starters/swingmen) and loot drop pool filtering.
 
 **Other guards:** Small-sample cap (HR<5, RBI<15 → can't be Star/Starter); everyday floor (120+ games → can't fall below Platoon). Tiers feed loot rarity gates, draft auction valuations, and projection confidence.
 
@@ -374,7 +377,11 @@ Two modes — **weekly** and **daily matchup-aware** — sharing a constrained g
 
 Product messaging: **in-house statistical ML**, not generative AI.
 
-### 6. Pitcher role-transition research (sandbox)
+### 6. Pitcher role-transition research → production classifier
+
+Two-part research arc: a rigorous negative result at the pitch-level, followed by a pivot to aggregate-signal classification that's now live in production.
+
+#### 6a. Pitch-level research (sandbox, negative result)
 
 Independent research module (`dugout/sandbox/`) investigating whether **pitch-level Statcast data** could beat flat league-average conversion factors for projecting SP↔RP transitions. Built a full pipeline from scratch: 50+ pitcher registry, Statcast scraper (447 parquet files, 2015-2025), pitch-by-pitch arsenal decomposition, structural role-transition features, and a cross-validated backtest with statistical significance testing.
 
@@ -386,7 +393,15 @@ Independent research module (`dugout/sandbox/`) investigating whether **pitch-le
 
 **Result: negative.** Across 89 cross-validated comparisons on 50+ pitchers, none of the three architectures produced statistically significant improvement over flat conversion factors (all p > 0.05, Cohen's d < 0.2). The per-pitcher signal exists for specific arms but is drowned by game-to-game scoring noise at the population level.
 
-**Why it's here:** A rigorous negative result is still a result. The research demonstrates the full pipeline — data engineering, feature extraction, model architecture, cross-validation with significance testing — and the discipline to measure honestly and stop when the data says stop. The infrastructure (registry, scraper, validation harness, 256 tests) is preserved for future approaches.
+#### 6b. Production classifier: in-season aggregates + hysteresis
+
+Instead of predicting WHEN a role transition occurs from pitch-level noise, classify the CURRENT role from recent-usage aggregates — a simpler, more stable, and directly production-useful problem. Recognizes modern bullpen realities (the "fireman" archetype: elite relievers used in the highest-leverage inning regardless of whether that's the 8th or 9th) that a static career-stat-based classifier permanently misclassifies.
+
+**Why this is novel in fantasy baseball:** every other platform I'm aware of (ESPN, Yahoo, Sleeper, CBS) uses positional eligibility (SP/RP) only — any granular-role information is maintained by human editorial staff reading news updates. Dugout's gear-eligibility system *requires* continuous automated role classification (each role unlocks different gear slots), so I built one.
+
+**Hysteresis bands for stability.** Single-threshold classifiers flip-flop at boundaries as the rolling window evolves — a pitcher hovering at the edge would change roles week-to-week. Standard fix: asymmetric hysteresis — a stricter bar to *acquire* a role, a looser bar to *keep* it, with a dampening zone between. Same canonical pattern used in network engineering (BGP route flap damping), industrial control (thermostat hysteresis), and ML drift detection (ADWIN / DDM). Locked down by a dedicated spec-test suite covering every threshold-boundary case — including a named regression test for the dual-role classification that motivated the redesign.
+
+**Why the full arc matters:** rigorous negative on pitch-level + disciplined pivot to aggregate signals + production deployment with spec tests = honest research discipline, not sunk-cost fallacy. Infrastructure from the sandbox (registry, scraper, validation harness, 256 tests) is preserved for future approaches.
 
 ---
 
@@ -475,6 +490,8 @@ Daily processing in the early-morning ET window. Dropped players sit on waivers 
 **Phase 2 personality gating:** Bench upgrades are probabilistically gated by a per-archetype `phase2_upgrade_chance` — aggressive archetypes upgrade most nights; patient archetypes hold more often. Late Surge bots scale their chance with the season-phase surge multiplier. This simulates a human "holding" bench players for upcoming matchups rather than mindlessly optimizing every night.
 
 **Waiver hold visibility:** Player search results and the Research Hub's Free Agents tab surface waiver hold status inline with date badges — users see exactly when a recently dropped player becomes available without navigating away. Enhanced denial notifications explain *why* a claim was denied (hold window, roster cap, position eligibility) so users aren't left guessing.
+
+**Rolling waiver priority:** ESPN-standard rolling-priority model: the winner of each contested claim drops to the back of the line and every team ranked below them shifts up by one, keeping the priority range compact across the league's roster count. Prior implementation computed priority from current reverse-standings at claim-submission time — which let the last-place team monopolize every contested claim with no natural equalizer. The rolling model rewards attentive managers over a season: a team that files claims consistently burns through their priority and naturally rotates with teams that didn't. Alembic migration seeds existing leagues via a single window-function `UPDATE` (`ROW_NUMBER() OVER (PARTITION BY league_id ORDER BY season_points, id)`) — idempotent, safe to re-run, no per-league loop.
 
 ### Bot trade engine
 
